@@ -8,7 +8,7 @@
 #include <getopt.h>
 #include "wisun_fsk_common.h"
 
-#define URH_WIRUN_FSK_PLUGIN_VERSION		"1.0.0"
+#define URH_WIRUN_FSK_PLUGIN_VERSION		"1.0.1"
 
 static int option_human = 0;
 static int option_hexo = 0;
@@ -364,6 +364,33 @@ static int wisun_fsk_encode_rsc(const char *str01)
 	return 0;
 }
 
+static int wisun_fsk_interleaving(const char *str01)
+{
+	size_t group_count = option_human ? 4 : 0;
+	uint8_t buf[4096] = { 0 };
+	size_t binary_size;
+
+	binary_size = strict_str01_to_buffer(str01, buf, sizeof(buf), 0);
+	if (!binary_size)
+		return -1;
+
+	/* 2-bit u1u0 as one symbol, 16 symbol as one block */
+	if (binary_size % 32) {
+		fprintf(stderr, "the input is not block group data\n");
+		return -1;
+	}
+
+	interleaving_bits(buf, binary_size, buf);
+
+	if (option_hexo)
+		print_hex_bytes(buf, binary_size / 8);
+	else
+		print_binary_bits_msbfirst(buf, 0, binary_size - 1,
+					   group_count);
+
+	return 0;
+}
+
 /* Wisun 2-FSK packet format:
  * SHR: PREAMBLE * n + SFD
  * PHY Header
@@ -511,6 +538,7 @@ static struct option long_options[] = {
 	{ "pn9",	no_argument,		NULL,		'P' },
 	{ "rsc",	no_argument,		NULL,		'R' },
 	{ "nrnsc",	no_argument,		NULL,		'N' },
+	{ "interleaving", no_argument,		NULL,		'i' },
 	{ "help",	no_argument,		NULL,		'h' },
 	{ "version",	no_argument,		NULL,		'v' },
 	{ "decode",	no_argument,		NULL,		'd' },
@@ -534,12 +562,14 @@ static void print_usage(void)
 	fprintf(stderr, "   --pn9:               encode/decode binary strings by PN9\n");
 	fprintf(stderr, "   --nrnsc:             encode binary strings by NRNSC encoder\n");
 	fprintf(stderr, "   --rsc                encode binary string by RSC encoder\n");
+	fprintf(stderr, "   --interleaving:      interleaving the input binary blocks\n");
 }
 
 enum {
 	ALGO_PN9,
 	ALGO_NRNSC,
 	ALGO_RSC,
+	ALGO_INTERLEAVING,
 };
 
 int main(int argc, char **argv)
@@ -564,6 +594,9 @@ int main(int argc, char **argv)
 			break;
 		case 'R':
 			algo = ALGO_RSC;
+			break;
+		case 'i':
+			algo = ALGO_INTERLEAVING;
 			break;
 
 		case 'h':
@@ -603,6 +636,9 @@ int main(int argc, char **argv)
 		break;
 	case ALGO_RSC:
 		ret = wisun_fsk_encode_rsc(argv[optind]);
+		break;
+	case ALGO_INTERLEAVING:
+		ret = wisun_fsk_interleaving(argv[optind]);
 		break;
 	}
 

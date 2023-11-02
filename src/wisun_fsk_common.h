@@ -16,4 +16,6 @@ void pn9_payload_decode(uint8_t *buf, size_t byte_size);
 uint8_t rsc_input_bit(uint8_t *m, int bi);
 uint8_t nrnsc_input_bit(uint8_t *m, int bi);
 
+void interleaving_bits(const uint8_t *buf, size_t binary_bits, uint8_t *out);
+
 #endif

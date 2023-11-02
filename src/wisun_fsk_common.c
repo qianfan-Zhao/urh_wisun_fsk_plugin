@@ -165,3 +165,70 @@ uint8_t nrnsc_input_bit(uint8_t *m, int bi)
 	*m = (((*m) >> 1) | (bi << 3)) & 0x0f;
 	return nrnsc_tables[*m];
 }
+
+/*
+ * based on <802.15.4-2020.pdf>:
+ *
+ * $ python3
+ * >>> for k in range(16):
+ * ...     print(15 - 4 * (k % 4) - k // 4)
+ * ...
+ *
+ * Example:
+ * symbol idx order: 00 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15
+ * raw symbols:      aa bb cc dd ee ff gg hh ii jj kk ll mm nn oo pp
+ * result:           pp ll hh dd oo kk gg cc nn jj ff bb mm ii ee aa
+ */
+static const uint8_t interleaving_symbol_target[16] = {
+	15,
+	11,
+	7,
+	3,
+	14,
+	10,
+	6,
+	2,
+	13,
+	9,
+	5,
+	1,
+	12,
+	8,
+	4,
+	0,
+};
+
+void interleaving_bits(const uint8_t *buf, size_t binary_bits, uint8_t *out)
+{
+	const uint8_t *p_buf = buf;
+	uint8_t *p_out = out;
+
+	/* 2 bit = 1 symbol
+	 * 16 symbol = 1 block
+	 * -> 1block = 32bit
+	 */
+	for (size_t bit = 0; bit < binary_bits / 32 * 32; bit += 32) {
+		uint32_t in = 0, out = 0;
+
+		in = (p_buf[0] << 24) | (p_buf[1] << 16)
+			| (p_buf[2] << 8) | p_buf[3];
+
+		for (size_t symbol_idx = 0; symbol_idx < 16; symbol_idx++) {
+			uint8_t symbol = (in >> 30) & 0b11;
+			uint8_t target_idx;
+
+			in <<= 2; /* shift out the MSB */
+			target_idx = interleaving_symbol_target[symbol_idx];
+			target_idx = 15 - target_idx;
+			out |= (symbol << (target_idx * 2));
+		}
+
+		p_out[0] = (out >> 24) & 0xff;
+		p_out[1] = (out >> 16) & 0xff;
+		p_out[2] = (out >>  8) & 0xff;
+		p_out[3] = (out >>  0) & 0xff;
+
+		p_buf += 4;
+		p_out += 4;
+	}
+}

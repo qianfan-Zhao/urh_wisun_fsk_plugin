@@ -10,7 +10,7 @@ clean:
 COMMON_FILE=src/wisun_fsk_common.c
 
 urh_wisun_fsk.debug: src/urh_wisun_fsk.c ${COMMON_FILE}
-	${CC} -Wall -Og -DDEBUG=1 $^ -o $@
+	${CC} -Wall -g -O0 -DDEBUG=1 $^ -o $@
 
 urh_wisun_fsk: src/urh_wisun_fsk.c ${COMMON_FILE}
 	${CC} -Wall -O2 $^ -o $@
