@@ -6,9 +6,10 @@
 #include <stdint.h>
 #include <string.h>
 #include <getopt.h>
+#include <assert.h>
 #include "wisun_fsk_common.h"
 
-#define URH_WIRUN_FSK_PLUGIN_VERSION		"1.0.1"
+#define URH_WIRUN_FSK_PLUGIN_VERSION		"1.0.2"
 
 static int option_human = 0;
 static int option_hexo = 0;
@@ -16,21 +17,25 @@ static int option_hexo = 0;
 #if DEBUG > 0
 static const char *str01_strstr(const char *str01, const char *needle)
 {
-	int match_idx = 0, match_length = strlen(needle);
-	const char *start = NULL;
+	int match_length = strlen(needle);
 
-	for (const char *s = str01; *s != '\0'; s++) {
-		if (*s == '-' || *s == ':')
-			continue;
+	for (const char *from = str01; *from != '\0'; from++) {
+		const char *start = NULL;
+		int match_idx = 0;
 
-		if (*s == needle[match_idx]) {
-			if (match_idx == 0)
-				start = s;
+		for (const char *s = from; *s != '\0'; s++) {
+			if (*s == '-' || *s == ':')
+				continue;
 
-			if (++match_idx == match_length)
-				return start;
-		} else {
-			match_idx = 0;
+			if (*s == needle[match_idx]) {
+				if (match_idx == 0)
+					start = s;
+
+				if (++match_idx == match_length)
+					return start;
+			} else {
+				break;
+			}
 		}
 	}
 
@@ -39,15 +44,23 @@ static const char *str01_strstr(const char *str01, const char *needle)
 
 static int str01_strncmp(const char *str01, const char *s2, size_t n)
 {
-	for (const char *s = str01; s - str01 < n; s++) {
+	const char *s = str01;
+	size_t count = 0;
+
+	while (count < n) {
 		int diff;
 
 		/* too short */
 		if (*s == '\0')
 			return -1;
 
-		if (*s == '-' || *s == ':')
+		if (*s == '-' || *s == ':') {
+			s++;
 			continue;
+		} else if (*s2 == '-' || *s2 == ':') {
+			s2++;
+			continue;
+		}
 
 		/* different length */
 		if (*s2 == '\0')
@@ -57,7 +70,9 @@ static int str01_strncmp(const char *str01, const char *s2, size_t n)
 		if (diff)
 			return diff;
 
+		s++;
 		s2++;
+		count++;
 	}
 
 	return 0;
@@ -482,14 +497,131 @@ static int wisun_2fsk_str01_find_shr(const char *str01, size_t *ret_preamble_sz,
 	return -1;
 }
 
-static int wisun_2fsk_packet_decode(const char *str01)
+#define WISUN_2FSK_PHR_MODE_SWITCH	(1 << 0)
+#define WISUN_2FSK_PHR_FCS_TYPE_CRC16	(1 << 3)
+#define WISUN_2FSK_PHR_DATA_WHITENING	(1 << 4)
+
+static uint16_t wisun_2fsk_fix_phr_order(uint16_t phr)
 {
-	size_t group_count = option_human ? 4 : 0;
-	size_t preamble_sz, binary_size, byte_size, payload_idx;
+	uint16_t phr_msbfirst = reverse16(phr);
+
+	/* phr field format
+	 * bit0:    mode switch
+	 * bit3:    fcs type, 0 = CRC32, 1 = CRC16
+	 * bit4:    data whitening
+	 * bit5-15: frame length, transmitted MSB first.
+	 */
+
+	return (phr_msbfirst << 5) | (phr & 0x1f);
+}
+
+static int wisun_2fsk_packet_recovery(uint8_t *p_sfd, size_t binary_size,
+				      int skip_verify,
+				      size_t *ret_frame_length)
+{
+	uint16_t phr, frame_length;
+	uint8_t *p = p_sfd;
+
+	if (binary_size <= 32) /* bit length of SFD + PHR */
+		return -1;
+
+	/* skip sfd */
+	binary_size -= 16;
+	p += 2;
+
+	phr = wisun_2fsk_fix_phr_order(buffer_peek_u16_b1b0(p));
+	binary_size -= 16;
+	p += 2;
+
+	frame_length = phr >> 5;
+	if (binary_size < frame_length * 8)
+		return -1;
+
+	if (phr & WISUN_2FSK_PHR_DATA_WHITENING)
+		pn9_payload_decode(p, frame_length);
+
+	if (!skip_verify) {
+		bool good = false;
+
+		if (!(phr & WISUN_2FSK_PHR_FCS_TYPE_CRC16))
+			good = ieee_802154_fcs32_buf_is_good(p, frame_length);
+		else
+			fprintf(stderr, "warnning: FCS16 is not supported\n");
+
+		if (!good)
+			return -1;
+	}
+
+	*ret_frame_length = frame_length;
+	return 0;
+}
+
+
+static void wisun_2fsk_print_packet(const uint8_t *buf, size_t binary_size,
+				    size_t preamble_sz,
+				    enum wisun_2fsk_sfd_type type,
+				    size_t frame_length)
+{
+	size_t byte_size;
+
+	byte_size = binary_size / 8;
+	if (binary_size % 8)
+		byte_size++;
+
+	if (option_hexo) {
+		if (option_human) {
+			const uint8_t *p = buf;
+			size_t crc_sz = 4;
+			uint16_t phr;
+
+			print_hex_bytes(p, preamble_sz / 8);
+			p += preamble_sz / 8;
+			printf("-");
+
+			printf("%04x-", buffer_peek_u16_b1b0(p)); /* sfd */
+			p += 2;
+
+			phr = buffer_peek_u16_b1b0(p);
+			printf("%04x-", phr);
+			p += 2;
+
+			if (frame_length < 2)
+				goto print_remain;
+
+			if (phr & WISUN_2FSK_PHR_FCS_TYPE_CRC16) {
+				if (frame_length <= 2)
+					goto print_remain;
+				crc_sz = 2;
+			} else if (frame_length <= 4) {
+				goto print_remain;
+			}
+
+			print_hex_bytes(p, frame_length - crc_sz);
+			p += (frame_length - crc_sz);
+			frame_length = crc_sz;
+			printf("-");
+
+		print_remain:
+			print_hex_bytes(p, frame_length);
+		} else {
+			print_hex_bytes(buf, byte_size);
+		}
+	} else {
+		size_t group_sz = option_human ? 4 : 0;
+
+		print_binary_bits_lsbfirst(buf, 0, binary_size - 1, group_sz);
+	}
+
+	printf("\n");
+}
+
+static int wisun_2fsk_packet_decode(const char *str01, int skip_verify)
+{
+	size_t preamble_sz, binary_size, byte_size, frame_len;
 	enum wisun_2fsk_sfd_type type;
 	uint8_t buf[8192] = { 0 };
 	const char *endp;
-	int idx;
+	int idx, ret;
 
 	idx = wisun_2fsk_str01_find_shr(str01, &preamble_sz, &type);
 	if (idx < 0) {
@@ -508,44 +640,37 @@ static int wisun_2fsk_packet_decode(const char *str01)
 	if (binary_size % 8)
 		byte_size++;
 
-	payload_idx = preamble_sz / 8 + 2 /* SFD */ + 2 /* PHR */;
-	pn9_payload_decode(&buf[payload_idx], byte_size - payload_idx);
-
-	if (option_hexo) {
-		const uint8_t *p = buf;
-
-		print_hex_bytes(p, preamble_sz / 8);
-		p += preamble_sz / 8;
-		printf("-");
-
-		printf("%04x-", buffer_peek_u16_b1b0(p)); /* sfd */
-		p += 2;
-
-		printf("%04x-", buffer_peek_u16_b1b0(p)); /* phr */
-		p += 2;
-
-		print_hex_bytes(p, byte_size - payload_idx);
-	} else {
-		print_binary_bits_lsbfirst(buf, 0, binary_size - 1, group_count);
+	/* frame_len: total number of octets contained in the PSDU.
+	 *            including PHY payload and CRC.
+	 *            doesn't include PHR.
+	 */
+	ret = wisun_2fsk_packet_recovery(buf + preamble_sz / 8,
+					 binary_size - preamble_sz,
+					 skip_verify,
+					 &frame_len);
+	if (ret < 0) {
+		fprintf(stderr, "verify 802.15.4 packet failed\n");
+		return ret;
 	}
 
-	printf("\n");
+	wisun_2fsk_print_packet(buf, binary_size, preamble_sz, type, frame_len);
 	return 0;
 }
 
 static struct option long_options[] = {
-	/* name		has_arg,		*flag,		val */
-	{ "pn9",	no_argument,		NULL,		'P' },
-	{ "rsc",	no_argument,		NULL,		'R' },
-	{ "nrnsc",	no_argument,		NULL,		'N' },
-	{ "interleaving", no_argument,		NULL,		'i' },
-	{ "help",	no_argument,		NULL,		'h' },
-	{ "version",	no_argument,		NULL,		'v' },
-	{ "decode",	no_argument,		NULL,		'd' },
-	{ "encode",	no_argument,		NULL,		'e' },
-	{ "hexo",	no_argument,		NULL,		'H' },
-	{ "human",	no_argument,		NULL,		'M' },
-	{ NULL,		0,			NULL,		0   },
+	/* name			has_arg,		*flag,		val */
+	{ "pn9",		no_argument,		NULL,		'P' },
+	{ "rsc",		no_argument,		NULL,		'R' },
+	{ "nrnsc",		no_argument,		NULL,		'N' },
+	{ "interleaving",	no_argument,		NULL,		'i' },
+	{ "help",		no_argument,		NULL,		'h' },
+	{ "version",		no_argument,		NULL,		'v' },
+	{ "decode",		no_argument,		NULL,		'd' },
+	{ "encode",		no_argument,		NULL,		'e' },
+	{ "hexo",		no_argument,		NULL,		'H' },
+	{ "human",		no_argument,		NULL,		'M' },
+	{ "skip-verify",	no_argument,		NULL,		'V' },
+	{ NULL,			0,			NULL,		0   },
 };
 
 static void print_usage(void)
@@ -559,23 +684,53 @@ static void print_usage(void)
 	fprintf(stderr, "   --human:             print the output string in human format\n");
 	fprintf(stderr, "\n");
 	fprintf(stderr, "Available algo for encode/decode:\n");
+	fprintf(stderr, "   --packet:            encode/decode the binary string as a full packet.\n");
+	fprintf(stderr, "                        (the default algo)\n");
 	fprintf(stderr, "   --pn9:               encode/decode binary strings by PN9\n");
 	fprintf(stderr, "   --nrnsc:             encode binary strings by NRNSC encoder\n");
 	fprintf(stderr, "   --rsc                encode binary string by RSC encoder\n");
 	fprintf(stderr, "   --interleaving:      interleaving the input binary blocks\n");
+	fprintf(stderr, "\n");
+	fprintf(stderr, "Options for encode/decode packet(--packet):\n");
+	fprintf(stderr, "   --skip-verify:       do not verify 802.15.4 packet\n");
 }
 
 enum {
+	ALGO_PACKET,
 	ALGO_PN9,
 	ALGO_NRNSC,
 	ALGO_RSC,
 	ALGO_INTERLEAVING,
 };
 
+#if DEBUG > 0
+static void test_str01_strstr(void)
+{
+	const char *base = "0-0-1-0-1-0-1";
+	const char *s;
+
+	assert(str01_strstr("0-0-1-0-1", "0101") != NULL);
+
+	s = str01_strstr(base, "0101");
+	assert(s != NULL);
+	assert(s - base == 2);
+	assert(str01_strncmp(s, "0101", 4) == 0);
+	assert(str01_strncmp(s, "0-1-0-1", 4) == 0);
+}
+static void self_test(void)
+{
+	test_str01_strstr();
+}
+#endif
+
 int main(int argc, char **argv)
 {
-	int algo = -1, decode = 1;
+	int algo = ALGO_PACKET, decode = 1, skip_verify = 0;
 	int ret = -1;
+
+#if DEBUG > 0
+	self_test();
+#endif
 
 	while (1) {
 		int option_index = 0;
@@ -615,6 +770,9 @@ int main(int argc, char **argv)
 		case 'M':
 			option_human = 1;
 			break;
+		case 'V':
+			skip_verify = 1;
+			break;
 		}
 	}
 
@@ -624,9 +782,10 @@ int main(int argc, char **argv)
 	}
 
 	switch (algo) {
-	default:
+	default: /* ALGO_PACKET */
 		if (decode)
-			ret = wisun_2fsk_packet_decode(argv[optind]);
+			ret = wisun_2fsk_packet_decode(argv[optind],
+						       skip_verify);
 		break;
 	case ALGO_PN9:
 		ret = wisun_fsk_pn9_encode_data_payload(argv[optind]);
