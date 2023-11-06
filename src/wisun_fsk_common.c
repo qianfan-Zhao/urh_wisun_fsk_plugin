@@ -8,6 +8,56 @@
 #include <stdbool.h>
 #include "wisun_fsk_common.h"
 
+void bufwrite_init(struct bufwrite *b, uint8_t *buf, size_t bufsz)
+{
+	b->buf = buf;
+	b->size = bufsz;
+	b->len = 0;
+	b->errno = 0;
+}
+
+uint8_t *bufwrite_push_data(struct bufwrite *b, const uint8_t *data, size_t sz)
+{
+	size_t remain = b->size - b->len;
+	uint8_t *ptr = &b->buf[b->len];
+
+	if (remain < sz) {
+		size_t left = sz - remain;
+
+		b->errno -= left;
+		return NULL;
+	} else if (data && sz) {
+		memcpy(ptr, data, sz);
+		b->len += sz;
+	}
+
+	return ptr;
+}
+
+uint8_t *bufwrite_push_le8(struct bufwrite *b, uint8_t le8)
+{
+	return bufwrite_push_data(b, &le8, sizeof(le8));
+}
+
+uint8_t *bufwrite_push_le16(struct bufwrite *b, uint16_t le16)
+{
+	uint8_t tmp[2] = { (le16 >> 0) & 0xff, (le16 >> 8) & 0xff };
+
+	return bufwrite_push_data(b, tmp, sizeof(tmp));
+}
+
+uint8_t *bufwrite_push_le32(struct bufwrite *b, uint32_t le32)
+{
+	uint8_t tmp[4] = {
+		(le32 >>  0) & 0xff,
+		(le32 >>  8) & 0xff,
+		(le32 >> 16) & 0xff,
+		(le32 >> 24) & 0xff,
+	};
+
+	return bufwrite_push_data(b, tmp, sizeof(tmp));
+}
+
 uint8_t reverse8(uint8_t x)
 {
 	x = (((x & 0xaa) >> 1) | ((x & 0x55) << 1));

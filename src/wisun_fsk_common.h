@@ -11,6 +11,20 @@
 
 #define ARRAY_SIZE(a)			(sizeof(a) / sizeof(a[0]))
 
+struct bufwrite {
+	uint8_t	*buf;
+	size_t	len;
+	size_t	size;
+	int	errno;
+};
+
+void bufwrite_init(struct bufwrite *b, uint8_t *buf, size_t bufsize);
+
+uint8_t *bufwrite_push_le8(struct bufwrite *b, uint8_t u8);
+uint8_t *bufwrite_push_le16(struct bufwrite *b, uint16_t le16);
+uint8_t *bufwrite_push_le32(struct bufwrite *b, uint32_t le32);
+uint8_t *bufwrite_push_data(struct bufwrite *b, const uint8_t *data, size_t sz);
+
 uint8_t reverse8(uint8_t x);
 uint16_t reverse16(uint16_t x);
 uint32_t reverse32(uint32_t x);

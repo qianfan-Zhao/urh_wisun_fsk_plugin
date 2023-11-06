@@ -5,15 +5,19 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
 #include <getopt.h>
 #include <assert.h>
+#include <ctype.h>
 #include "wisun_fsk_common.h"
 
-#define URH_WIRUN_FSK_PLUGIN_VERSION		"1.0.2"
+#define URH_WIRUN_FSK_PLUGIN_VERSION		"1.0.3"
+
+#define number_is_even(n)			(((n) & 1) == 0)
 
 static int option_verbose = 0;
 static int option_human = 0;
-static int option_hexo = 0;
+static int option_hexi = 0, option_hexo = 0;
 
 #if DEBUG > 0
 static const char *str01_strstr_endp(const char *str01, const char **endp,
@@ -151,6 +155,9 @@ static size_t str01_to_buffer(const char *s, const char **endp, uint8_t *buf,
 {
 	size_t bytes = 0, binary_counts = 0;
 
+	if (buf && bufsz)
+		buf[0] = 0;
+
 	for (; *s != '\0' && bytes < bufsz; s++) {
 		uint8_t bit = binary_counts % 8;
 		int n = *s - '0';
@@ -197,6 +204,53 @@ static size_t strict_str01_to_buffer(const char *str01, uint8_t *buf,
 	}
 
 	return binary_size;
+}
+
+static int xdigit(char ch)
+{
+	int xch = toupper(ch);
+
+	return xch >= 'A' ? xch - 'A' + 10 : xch - '0';
+}
+
+static size_t strhex_to_buffer(const char *str, const char **endp, uint8_t *buf,
+			       size_t len)
+{
+	const char *p = str;
+	size_t i = 0;
+
+	while (*p != '\0' && i < len) {
+		if (!isxdigit(p[0])) { /* skip split symbol */
+			++p;
+			continue;
+		} else if (!isxdigit(p[1])) {
+			break;
+		}
+
+		uint8_t b = (xdigit(p[0]) << 4) | xdigit(p[1]);
+		buf[i++] = b;
+		p += 2;
+	}
+
+	if (endp)
+		*endp = p;
+
+	return i;
+}
+
+static size_t strict_strhex_to_buffer(const char *s, uint8_t *buf, size_t bufsz)
+{
+	size_t n;
+	const char *endp;
+
+	n = strhex_to_buffer(s, &endp, buf, bufsz);
+	if (*endp != '\0') {
+		fprintf(stderr, "input hex string is bad after:\n");
+		fprintf(stderr, "%s\n", endp);
+		return 0;
+	}
+
+	return n;
 }
 
 static void print_hex_bytes(const uint8_t *buf, size_t byte_size)
@@ -526,6 +580,17 @@ static const char *wisun_2fsk_phy_sfd_binary_streams[WISUN_2FSK_SFD_MAX] = {
 	[WISUN_2FSK_SFD_UNCODED1] = "0111101000001110",
 };
 
+static uint16_t wisun_2fsk_sfd_value(enum wisun_2fsk_sfd_type t)
+{
+	uint16_t value = 0xffff;
+
+	if (t < WISUN_2FSK_SFD_MAX)
+		str01_to_buffer(wisun_2fsk_phy_sfd_binary_streams[t],
+				NULL, (uint8_t *)&value, sizeof(value), 1);
+
+	return value;
+}
+
 /* find a vaild SHR(including preamble and sfd) from the 01 binary streams.
  * Return the preamble index in 01 binary streams.
  * -1 if not found.
@@ -615,6 +680,11 @@ static uint16_t wisun_2fsk_fix_phr_order(uint16_t phr)
 	 */
 
 	return (phr_msbfirst << 5) | (phr & 0x1f);
+}
+
+static uint16_t wisun_2fsk_make_phr(unsigned int options, uint16_t frame_length)
+{
+	return (options & 0x1f) | reverse16(frame_length);
 }
 
 static int wisun_2fsk_packet_recovery(uint8_t *p_sfd, size_t binary_size,
@@ -759,6 +829,239 @@ static int wisun_2fsk_packet_decode(const char *str01, int skip_verify)
 	return 0;
 }
 
+static size_t wisun_2fsk_fec_padding(uint8_t *buf, size_t frame_length,
+				     enum wisun_2fsk_sfd_type type,
+				     uint8_t memory_state)
+{
+	static const uint8_t rsc_tail_bits[] = {
+		[0] = 0b000,
+		[1] = 0b001,
+		[2] = 0b011,
+		[3] = 0b010,
+		[4] = 0b111,
+		[5] = 0b110,
+		[6] = 0b100,
+		[7] = 0b101,
+	};
+	uint8_t pad[2] = { 0b11010000, 0b11010000 };
+	size_t len = 2 /* Lphr */ + frame_length;
+	size_t pad_sz = 1 + number_is_even(len);
+
+	memory_state &= 0b111;
+
+	if (type != WISUN_2FSK_SFD_CODED0 && type != WISUN_2FSK_SFD_CODED1) {
+		/* no padding */
+		return 0;
+	}
+
+	if (type == WISUN_2FSK_SFD_CODED0) /* RSC */
+		pad[0] |= rsc_tail_bits[memory_state];
+
+	memcpy(buf, pad, pad_sz);
+	return pad_sz;
+}
+
+/*
+ * XXX: encode packet with RSC doesn't work now.
+ */
+static int wisun_2fsk_packet_encode(const char *arg,
+				    size_t preamble_sz,
+				    enum wisun_2fsk_sfd_type type,
+				    uint16_t phr_options,
+				    int interleaving)
+{
+	size_t group_sz = option_human ? 4 : 0;
+	uint8_t buf[4096] = { 0 }, data[1024] = { 0 }, fec[2048] = { 0 };
+	struct wisun_2fsk_fec_encoder encoder = { 0 };
+	size_t frame_length = 0, data_res = 0, data_idx = 0, whitening_sz = 0;
+	uint8_t *p_frame, *p_phr, *p_whitening;
+	uint8_t pad[2];
+	size_t pad_sz = 0;
+	struct bufwrite b;
+	uint16_t phr = 0;
+
+	encoder.buf = fec;
+	encoder.bufsz = sizeof(fec);
+
+	/* reverse space for phr, crc, padding and tail bits */
+	p_phr = data;
+	data_idx = sizeof(phr);
+	data_res = sizeof(phr);
+	data_res += phr_options & WISUN_2FSK_PHR_FCS_TYPE_CRC16 ? 2 : 4;
+
+	bufwrite_init(&b, buf, sizeof(buf));
+
+	/* fill the WISUN_2FSK_PREAMBLE bits in lsb first */
+	for (size_t i = 0; i < preamble_sz / 8; i++)
+		bufwrite_push_le8(&b, 0xaa);
+
+	/* fill SFD */
+	bufwrite_push_le16(&b, wisun_2fsk_sfd_value(type));
+
+	if (option_hexi) {
+		frame_length = strict_strhex_to_buffer(arg, &data[data_idx],
+						       sizeof(data) - data_res);
+		if (!frame_length)
+			return -1;
+	} else {
+		size_t binary_size;
+
+		binary_size = strict_str01_to_buffer(arg, &data[data_idx],
+						     sizeof(data) - data_res,
+						     1);
+		if (!binary_size)
+			return -1;
+
+		if (binary_size % 8) {
+			fprintf(stderr, "not byte aligned\n");
+			return -1;
+		}
+
+		frame_length = binary_size / 8;
+	}
+
+	if (option_verbose > 0) {
+		printf("Input:\n");
+		print_binary_bits_lsbfirst(&data[data_idx], 0,
+					   frame_length * 8 - 1,
+					   4);
+		putchar('\n');
+	}
+
+	/* append crc */
+	if (phr_options & WISUN_2FSK_PHR_FCS_TYPE_CRC16) {
+		fprintf(stderr, "FCS16 is not supported now\n");
+		return -1;
+	} else {
+		uint32_t c32 = ieee_802154_fcs32(IEEE_802154_FCS32_INIT,
+						 &data[data_idx],
+						 frame_length);
+
+		data_idx += frame_length;
+		data[data_idx++] = (c32 >>  0) & 0xff;
+		data[data_idx++] = (c32 >>  8) & 0xff;
+		data[data_idx++] = (c32 >> 16) & 0xff;
+		data[data_idx++] = (c32 >> 24) & 0xff;
+		frame_length += 4;
+	}
+
+	/* fill phr */
+	phr = wisun_2fsk_make_phr(phr_options, frame_length);
+	p_phr[0] = (phr >> 0) & 0xff;
+	p_phr[1] = (phr >> 8) & 0xff;
+
+	if (option_verbose > 0) {
+		printf("PHR, DATA, CRC:\n");
+		print_binary_bits_lsbfirst(data, 0,
+					   (frame_length + sizeof(phr)) * 8 - 1,
+					   4);
+		putchar('\n');
+	}
+
+	/* encode it */
+	switch (type) {
+	case WISUN_2FSK_SFD_CODED0:
+		encoder.m = RSC_INIT_M;
+		foreach_bit_in_buffer_lsbfirst(data, data_idx * 8,
+					       wisun_2fsk_rsc_input_bit,
+					       &encoder);
+
+		if (option_verbose > 0) {
+			printf("Memory state(M0-M2): %d%d%d\n",
+				(encoder.m >> 2) & 1,
+				(encoder.m >> 1) & 1,
+				(encoder.m >> 0) & 1);
+		}
+
+		pad_sz = wisun_2fsk_fec_padding(pad, frame_length, type,
+						encoder.m);
+		foreach_bit_in_buffer_lsbfirst(pad, pad_sz * 8,
+					       wisun_2fsk_rsc_input_bit,
+					       &encoder);
+		break;
+	case WISUN_2FSK_SFD_CODED1:
+		encoder.m = NRNSC_INIT_M;
+		foreach_bit_in_buffer_lsbfirst(data, data_idx * 8,
+					       wisun_2fsk_nrnsc_input_bit,
+					       &encoder);
+
+		pad_sz = wisun_2fsk_fec_padding(pad, frame_length, type, 0);
+		foreach_bit_in_buffer_lsbfirst(pad, pad_sz * 8,
+					       wisun_2fsk_nrnsc_input_bit,
+					       &encoder);
+		break;
+	default:
+		break;
+	}
+
+	if (option_verbose > 0 && pad_sz > 0) {
+		printf("Padding:\n");
+		print_binary_bits_lsbfirst(pad, 0, pad_sz * 8 - 1, 4);
+		putchar('\n');
+	}
+
+	switch (type) {
+	case WISUN_2FSK_SFD_CODED0:
+	case WISUN_2FSK_SFD_CODED1:
+		p_frame = bufwrite_push_data(&b, encoder.buf,
+					     encoder.encode_bits / 8);
+
+		if (option_verbose > 0) {
+			printf("After Convolutional:\n");
+			print_binary_bits_lsbfirst(encoder.buf, 0,
+						   encoder.encode_bits - 1,
+						   4);
+			putchar('\n');
+		}
+
+		if (interleaving) {
+			interleaving_bits(p_frame,
+					  encoder.encode_bits,
+					  p_frame);
+
+			if (option_verbose > 0) {
+				printf("After Interleaving:\n");
+				print_binary_bits_lsbfirst(p_frame, 0,
+					encoder.encode_bits - 1, 4);
+				putchar('\n');
+			}
+		}
+
+		p_whitening = p_frame + sizeof(phr) * 2;
+		whitening_sz = encoder.encode_bits / 8 - sizeof(phr) * 2;
+		break;
+	default:
+		p_frame = bufwrite_push_data(&b, data, data_idx);
+
+		p_whitening = p_frame + sizeof(phr);
+		whitening_sz = data_idx - sizeof(phr);
+		break;
+	}
+
+	if (phr_options & WISUN_2FSK_PHR_DATA_WHITENING) {
+		pn9_payload_decode(p_whitening, whitening_sz);
+
+		if (option_verbose > 0) {
+			printf("After Whitening:\n");
+			print_binary_bits_lsbfirst(p_frame, 0,
+						   encoder.encode_bits - 1,
+						   4);
+			putchar('\n');
+		}
+	}
+
+	if (option_verbose > 0)
+		printf("SHR, PHR, PSDU\n");
+
+	if (option_hexo)
+		print_hex_bytes(b.buf, b.len);
+	else
+		print_binary_bits_lsbfirst(b.buf, 0, b.len * 8 - 1, group_sz);
+	putchar('\n');
+
+	return 0;
+}
+
 enum {
 	OPTION_PACKET,
 	OPTION_PN9,
@@ -770,9 +1073,13 @@ enum {
 	OPTION_VERSION,
 	OPTION_DECODE,
 	OPTION_ENCODE,
+	OPTION_HEXI,
 	OPTION_HEXO,
 	OPTION_HUMAN,
 	OPTION_SKIP_VERIFY,
+	OPTION_SFD,
+	OPTION_PREAMBLE_SIZE,
+	OPTION_WHITENING,
 };
 
 static struct option long_options[] = {
@@ -787,9 +1094,13 @@ static struct option long_options[] = {
 	{ "version",		no_argument,		NULL,		OPTION_VERSION	},
 	{ "decode",		no_argument,		NULL,		OPTION_DECODE	},
 	{ "encode",		no_argument,		NULL,		OPTION_ENCODE	},
+	{ "hexi",		no_argument,		NULL,		OPTION_HEXI	},
 	{ "hexo",		no_argument,		NULL,		OPTION_HEXO	},
 	{ "human",		no_argument,		NULL,		OPTION_HUMAN	},
 	{ "skip-verify",	no_argument,		NULL,		OPTION_SKIP_VERIFY	},
+	{ "sfd",		required_argument,	NULL,		OPTION_SFD	},
+	{ "preamble-size",	required_argument,	NULL,		OPTION_PREAMBLE_SIZE	},
+	{ "whitening",		no_argument,		NULL,		OPTION_WHITENING	},
 	{ NULL,			0,			NULL,		0   },
 };
 
@@ -812,8 +1123,17 @@ static void print_usage(void)
 	fprintf(stderr, "   --rsc                encode binary string by RSC encoder\n");
 	fprintf(stderr, "   --interleaving:      interleaving the input binary blocks\n");
 	fprintf(stderr, "\n");
-	fprintf(stderr, "Options for encode/decode packet(--packet):\n");
+	fprintf(stderr, "Options for decode packet(--packet):\n");
 	fprintf(stderr, "   --skip-verify:       do not verify 802.15.4 packet\n");
+	fprintf(stderr, "Options for encode packet(--packet):\n");
+	fprintf(stderr, "   --hexi:              the input string is hex mode, not binary 01 string\n");
+	fprintf(stderr, "   --preamble-size:     the preamble bit length\n");
+	fprintf(stderr, "   --sfd type:          select the sfd type:\n");
+	fprintf(stderr, "                          coded0:   %04x\n", wisun_2fsk_sfd_value(WISUN_2FSK_SFD_CODED0));
+	fprintf(stderr, "                          uncoded0: %04x\n", wisun_2fsk_sfd_value(WISUN_2FSK_SFD_UNCODED0));
+	fprintf(stderr, "                          coded1:   %04x\n", wisun_2fsk_sfd_value(WISUN_2FSK_SFD_CODED1));
+	fprintf(stderr, "                          uncoded1: %04x\n", wisun_2fsk_sfd_value(WISUN_2FSK_SFD_UNCODED1));
+	fprintf(stderr, "   --whitening:         whitening phy payload data\n");
 }
 
 enum {
@@ -925,9 +1245,20 @@ static void self_test(void)
 }
 #endif
 
+static const char *wisun_2fsk_sfd_type_names[] = {
+	[WISUN_2FSK_SFD_CODED0] = "coded0",
+	[WISUN_2FSK_SFD_CODED1] = "coded1",
+	[WISUN_2FSK_SFD_UNCODED0] = "uncoded0",
+	[WISUN_2FSK_SFD_UNCODED1] = "uncoded1",
+};
+
 int main(int argc, char **argv)
 {
-	int algo = ALGO_PACKET, decode = 1, skip_verify = 0;
+	unsigned int algo_masks = 0;
+	enum wisun_2fsk_sfd_type sfd_type = WISUN_2FSK_SFD_UNCODED0;
+	size_t packet_encode_preamble_sz = 64;
+	uint16_t phr_options = 0;
+	int decode = 1, skip_verify = 0;
 	int ret = -1;
 
 #if DEBUG > 0
@@ -944,19 +1275,19 @@ int main(int argc, char **argv)
 
 		switch (c) {
 		case OPTION_PACKET:
-			algo = ALGO_PACKET;
+			algo_masks |= (1 << ALGO_PACKET);
 			break;
 		case OPTION_PN9:
-			algo = ALGO_PN9;
+			algo_masks |= (1 << ALGO_PN9);
 			break;
 		case OPTION_NRNSC:
-			algo = ALGO_NRNSC;
+			algo_masks |= (1 << ALGO_NRNSC);
 			break;
 		case OPTION_RSC:
-			algo = ALGO_RSC;
+			algo_masks |= (1 << ALGO_RSC);
 			break;
 		case OPTION_INTERLEAVING:
-			algo = ALGO_INTERLEAVING;
+			algo_masks |= (1 << ALGO_INTERLEAVING);
 			break;
 
 		case 'v':
@@ -979,6 +1310,9 @@ int main(int argc, char **argv)
 		case 'e':
 			decode = c == 'd';
 			break;
+		case OPTION_HEXI: /* hex input */
+			option_hexi = 1;
+			break;
 		case OPTION_HEXO: /* hex output */
 			option_hexo = 1;
 			break;
@@ -988,6 +1322,50 @@ int main(int argc, char **argv)
 		case OPTION_SKIP_VERIFY:
 			skip_verify = 1;
 			break;
+
+		case OPTION_SFD:
+			sfd_type = WISUN_2FSK_SFD_MAX;
+
+			for (enum wisun_2fsk_sfd_type t = 0;
+					t < WISUN_2FSK_SFD_MAX; t++) {
+				if (!strcmp(optarg, wisun_2fsk_sfd_type_names[t])) {
+					sfd_type = t;
+					break;
+				}
+			}
+
+			if (sfd_type == WISUN_2FSK_SFD_MAX) {
+				fprintf(stderr, "Invalid sfd type: %s\n",
+					optarg);
+				return -1;
+			}
+			break;
+		case OPTION_PREAMBLE_SIZE:
+			{
+				long n;
+				char *endp;
+
+				n = strtol(optarg, &endp, 10);
+				if (n < 0 || *endp != '\0') {
+					fprintf(stderr, "Invalid number: %s\n",
+						optarg);
+					return -1;
+				} else if (n % 8) {
+					fprintf(stderr, "preamble-size should"
+						" be multiple of 8bits\n");
+					return -1;
+				} else if (n > 256) {
+					fprintf(stderr, "preamble size is too"
+						" large\n");
+					return -1;
+				}
+				packet_encode_preamble_sz = (size_t)n;
+			}
+			break;
+
+		case OPTION_WHITENING:
+			phr_options |= WISUN_2FSK_PHR_DATA_WHITENING;
+			break;
 		}
 	}
 
@@ -996,24 +1374,26 @@ int main(int argc, char **argv)
 		return -1;
 	}
 
-	switch (algo) {
-	default: /* ALGO_PACKET */
+	if (algo_masks == 0 || algo_masks & (1 << ALGO_PACKET)) {
+		int interleaving = !!(algo_masks & (1 << ALGO_INTERLEAVING));
+
 		if (decode)
 			ret = wisun_2fsk_packet_decode(argv[optind],
 						       skip_verify);
-		break;
-	case ALGO_PN9:
+		else
+			ret = wisun_2fsk_packet_encode(argv[optind],
+						       packet_encode_preamble_sz,
+						       sfd_type,
+						       phr_options,
+						       interleaving);
+	} else if (algo_masks & (1 << ALGO_PN9)) {
 		ret = wisun_fsk_pn9_encode_data_payload(argv[optind]);
-		break;
-	case ALGO_NRNSC:
+	} else if (algo_masks & (1 << ALGO_NRNSC)) {
 		ret = wisun_fsk_encode_nrnsc(argv[optind]);
-		break;
-	case ALGO_RSC:
+	} else if (algo_masks & (1 << ALGO_RSC)) {
 		ret = wisun_fsk_encode_rsc(argv[optind]);
-		break;
-	case ALGO_INTERLEAVING:
+	} else if (algo_masks & (1 << ALGO_INTERLEAVING)) {
 		ret = wisun_fsk_interleaving(argv[optind]);
-		break;
 	}
 
 	return ret;
