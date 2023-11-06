@@ -15,7 +15,8 @@ static int option_human = 0;
 static int option_hexo = 0;
 
 #if DEBUG > 0
-static const char *str01_strstr(const char *str01, const char *needle)
+static const char *str01_strstr_endp(const char *str01, const char **endp,
+				     const char *needle)
 {
 	int match_length = strlen(needle);
 
@@ -31,8 +32,22 @@ static const char *str01_strstr(const char *str01, const char *needle)
 				if (match_idx == 0)
 					start = s;
 
-				if (++match_idx == match_length)
+				if (++match_idx == match_length) {
+					if (endp) {
+						s++;
+						/* skip any spliter */
+						while (*s != '\0') {
+							if (*s == '-'
+								|| *s == ':') {
+								s++;
+								continue;
+							}
+							break;
+						}
+						*endp = s;
+					}
 					return start;
+				}
 			} else {
 				break;
 			}
@@ -42,7 +57,13 @@ static const char *str01_strstr(const char *str01, const char *needle)
 	return NULL;
 }
 
-static int str01_strncmp(const char *str01, const char *s2, size_t n)
+static const char *str01_strstr(const char *str01, const char *needle)
+{
+	return str01_strstr_endp(str01, NULL, needle);
+}
+
+static int str01_strncmp_endp(const char *str01, const char *s2, size_t n,
+			      const char **endp)
 {
 	const char *s = str01;
 	size_t count = 0;
@@ -75,17 +96,52 @@ static int str01_strncmp(const char *str01, const char *s2, size_t n)
 		count++;
 	}
 
+	if (endp) {
+		/* skip any spliter */
+		while (*s != '\0') {
+			if (*s == '-'
+				|| *s == ':') {
+				s++;
+				continue;
+			}
+			break;
+		}
+		*endp = s;
+	}
+
 	return 0;
 }
-#else
-static const char *str01_strstr(const char *haystack, const char *needle)
+
+static int str01_strncmp(const char *str01, const char *s2, size_t n)
 {
-	return strstr(haystack, needle);
+	return str01_strncmp_endp(str01, s2, n, NULL);
+}
+#else
+static const char *str01_strstr_endp(const char *haystack, const char **endp,
+				     const char *needle)
+{
+	const char *s = strstr(haystack, needle);
+
+	if (s && endp)
+		*endp = s + strlen(needle);
+
+	return s;
 }
 
 static int str01_strncmp(const char *s1, const char *s2, size_t n)
 {
 	return strncmp(s1, s2, n);
+}
+
+static int str01_strncmp_endp(const char *s1, const char *s2, size_t n,
+			      const char **endp)
+{
+	int ret = strncmp(s1, s2, n);
+
+	if (ret == 0 && endp)
+		*endp = s1 + n;
+
+	return ret;
 }
 #endif
 
@@ -437,10 +493,12 @@ static int _wisun_2fsk_str01_find_shr(const char *str01, size_t *ret_preamble_sz
 				      enum wisun_2fsk_sfd_type *ret_sfd_type,
 				      const char **next)
 {
-	const char *p, *preamble = str01_strstr(str01, WISUN_2FSK_PREAMBLE);
+	const char *p, *endp, *preamble;
 	enum wisun_2fsk_sfd_type type = WISUN_2FSK_SFD_MAX;
 	size_t len_sfd = strlen(wisun_2fsk_phy_sfd_binary_streams[0]);
+	size_t preamble_sz = 0;
 
+	preamble = str01_strstr_endp(str01, &endp, WISUN_2FSK_PREAMBLE);
 	if (!preamble) {
 		if (next)
 			*next = NULL;
@@ -452,11 +510,14 @@ static int _wisun_2fsk_str01_find_shr(const char *str01, size_t *ret_preamble_sz
 		*next = p + 1;
 
 	do {
-		p += strlen(WISUN_2FSK_PREAMBLE);
-	} while (!str01_strncmp(p, WISUN_2FSK_PREAMBLE, strlen(WISUN_2FSK_PREAMBLE)));
+		preamble_sz += strlen(WISUN_2FSK_PREAMBLE);
+		p = endp;
+	} while (!str01_strncmp_endp(p, WISUN_2FSK_PREAMBLE,
+				     strlen(WISUN_2FSK_PREAMBLE),
+				     &endp));
 
 	if (ret_preamble_sz)
-		*ret_preamble_sz = p - preamble;
+		*ret_preamble_sz = preamble_sz;
 
 	for (enum wisun_2fsk_sfd_type t = 0; t < WISUN_2FSK_SFD_MAX; t++) {
 		if (!str01_strncmp(p, wisun_2fsk_phy_sfd_binary_streams[t],
@@ -733,9 +794,34 @@ static void test_str01_strstr(void)
 	assert(str01_strncmp(s, "0101", 4) == 0);
 	assert(str01_strncmp(s, "0-1-0-1", 4) == 0);
 }
+
+static void test_wisun_2fsk_str01_find_shr(void)
+{
+	const char *base;
+	enum wisun_2fsk_sfd_type type;
+	size_t preamble_sz;
+	int idx;
+
+	type = WISUN_2FSK_SFD_MAX;
+	base = "01010101010101010101010101010101" "1001000001001110";
+	idx = wisun_2fsk_str01_find_shr(base, &preamble_sz, &type);
+	assert(idx == 0);
+	assert(preamble_sz == 32);
+	assert(type == WISUN_2FSK_SFD_UNCODED0);
+
+	type = WISUN_2FSK_SFD_MAX;
+	base = "0101-0101-0101-0101-0101-0101-0101-0101" "-:-:-"
+	       "1001-0000-0100-1110";
+	idx = wisun_2fsk_str01_find_shr(base, &preamble_sz, &type);
+	assert(idx == 0);
+	assert(preamble_sz == 32);
+	assert(type == WISUN_2FSK_SFD_UNCODED0);
+}
+
 static void self_test(void)
 {
 	test_str01_strstr();
+	test_wisun_2fsk_str01_find_shr();
 }
 #endif
 
