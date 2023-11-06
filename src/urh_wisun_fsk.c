@@ -657,19 +657,35 @@ static int wisun_2fsk_packet_decode(const char *str01, int skip_verify)
 	return 0;
 }
 
+enum {
+	OPTION_PACKET,
+	OPTION_PN9,
+	OPTION_RSC,
+	OPTION_NRNSC,
+	OPTION_INTERLEAVING,
+	OPTION_HELP,
+	OPTION_VERSION,
+	OPTION_DECODE,
+	OPTION_ENCODE,
+	OPTION_HEXO,
+	OPTION_HUMAN,
+	OPTION_SKIP_VERIFY,
+};
+
 static struct option long_options[] = {
 	/* name			has_arg,		*flag,		val */
-	{ "pn9",		no_argument,		NULL,		'P' },
-	{ "rsc",		no_argument,		NULL,		'R' },
-	{ "nrnsc",		no_argument,		NULL,		'N' },
-	{ "interleaving",	no_argument,		NULL,		'i' },
-	{ "help",		no_argument,		NULL,		'h' },
-	{ "version",		no_argument,		NULL,		'v' },
-	{ "decode",		no_argument,		NULL,		'd' },
-	{ "encode",		no_argument,		NULL,		'e' },
-	{ "hexo",		no_argument,		NULL,		'H' },
-	{ "human",		no_argument,		NULL,		'M' },
-	{ "skip-verify",	no_argument,		NULL,		'V' },
+	{ "packet",		no_argument,		NULL,		OPTION_PACKET	},
+	{ "pn9",		no_argument,		NULL,		OPTION_PN9	},
+	{ "rsc",		no_argument,		NULL,		OPTION_RSC	},
+	{ "nrnsc",		no_argument,		NULL,		OPTION_NRNSC	},
+	{ "interleaving",	no_argument,		NULL,		OPTION_INTERLEAVING	},
+	{ "help",		no_argument,		NULL,		OPTION_HELP	},
+	{ "version",		no_argument,		NULL,		OPTION_VERSION	},
+	{ "decode",		no_argument,		NULL,		OPTION_DECODE	},
+	{ "encode",		no_argument,		NULL,		OPTION_ENCODE	},
+	{ "hexo",		no_argument,		NULL,		OPTION_HEXO	},
+	{ "human",		no_argument,		NULL,		OPTION_HUMAN	},
+	{ "skip-verify",	no_argument,		NULL,		OPTION_SKIP_VERIFY	},
 	{ NULL,			0,			NULL,		0   },
 };
 
@@ -741,36 +757,41 @@ int main(int argc, char **argv)
 			break;
 
 		switch (c) {
-		case 'P': /* PN9 */
+		case OPTION_PACKET:
+			algo = ALGO_PACKET;
+			break;
+		case OPTION_PN9:
 			algo = ALGO_PN9;
 			break;
-		case 'N':
+		case OPTION_NRNSC:
 			algo = ALGO_NRNSC;
 			break;
-		case 'R':
+		case OPTION_RSC:
 			algo = ALGO_RSC;
 			break;
-		case 'i':
+		case OPTION_INTERLEAVING:
 			algo = ALGO_INTERLEAVING;
 			break;
 
 		case 'h':
+		case OPTION_HELP:
 			print_usage();
 			return 0;
 		case 'v':
+		case OPTION_VERSION:
 			printf("version: %s\n", URH_WIRUN_FSK_PLUGIN_VERSION);
 			return 0;
-		case 'd': /* decode */
-		case 'e': /* encode */
-			decode = c == 'd';
+		case OPTION_DECODE:
+		case OPTION_ENCODE:
+			decode = c == OPTION_DECODE;
 			break;
-		case 'H': /* hex output */
+		case OPTION_HEXO: /* hex output */
 			option_hexo = 1;
 			break;
-		case 'M':
+		case OPTION_HUMAN:
 			option_human = 1;
 			break;
-		case 'V':
+		case OPTION_SKIP_VERIFY:
 			skip_verify = 1;
 			break;
 		}
