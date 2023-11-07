@@ -10,10 +10,10 @@ clean:
 COMMON_FILE=src/wisun_fsk_common.c
 
 urh_wisun_fsk.debug: src/urh_wisun_fsk.c ${COMMON_FILE}
-	${CC} -Wall -g -O0 -DDEBUG=1 $^ -o $@
+	${CC} -Wall -g -O0 -Wno-unused-function -DDEBUG=1 $^ -o $@
 
 urh_wisun_fsk: src/urh_wisun_fsk.c ${COMMON_FILE}
-	${CC} -Wall -O2 $^ -o $@
+	${CC} -Wall -O2 -Wno-unused-function $^ -o $@
 
 test: urh_wisun_fsk urh_wisun_fsk.debug
 	@for script in ./test/*.sh ; do \

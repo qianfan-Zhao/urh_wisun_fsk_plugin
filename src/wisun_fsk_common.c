@@ -252,7 +252,6 @@ void interleaving_bits(const uint8_t *buf, size_t binary_bits, uint8_t *out)
 
 			in <<= 2; /* shift out the MSB */
 			target_idx = interleaving_symbol_target[symbol_idx];
-			target_idx = 15 - target_idx;
 			out |= (symbol << (target_idx * 2));
 		}
 

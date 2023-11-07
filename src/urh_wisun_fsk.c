@@ -309,7 +309,7 @@ static int wisun_fsk_pn9_encode_data_payload(const char *str01)
 	return 0;
 }
 
-static void foreach_bit_in_msbfirst_buffer(const uint8_t *buf, size_t bit_size,
+static void foreach_bit_in_buffer_msbfirst(const uint8_t *buf, size_t bit_size,
 			void (*f)(int b, size_t bit_idx, void *private_data),
 			void *private_data)
 {
@@ -318,6 +318,25 @@ static void foreach_bit_in_msbfirst_buffer(const uint8_t *buf, size_t bit_size,
 
 	for (size_t i = 0; i < bit_size; i++) {
 		int b = (((*p_buffer) >> (7 - bit_idx))) & 1;
+
+		f(b, i, private_data);
+
+		if (++bit_idx == 8) {
+			p_buffer++;
+			bit_idx = 0;
+		}
+	}
+}
+
+static void foreach_bit_in_buffer_lsbfirst(const uint8_t *buf, size_t bit_size,
+			void (*f)(int b, size_t bit_idx, void *private_data),
+			void *private_data)
+{
+	const uint8_t *p_buffer = buf;
+	size_t bit_idx = 0;
+
+	for (size_t i = 0; i < bit_size; i++) {
+		int b = (((*p_buffer) >> bit_idx)) & 1;
 
 		f(b, i, private_data);
 
@@ -339,15 +358,24 @@ struct wisun_2fsk_fec_encoder {
 	uint8_t		bit_idx;
 };
 
+/* push 2bit in lsb first mode */
 static int wisun_2fsk_fec_encoder_push_2bits(struct wisun_2fsk_fec_encoder *arg,
 					     uint8_t u)
 {
-	if (arg->byte_idx < arg->bufsz) {
-		/* u is 2 bit, push it to arg->buf, align left */
-		int lshift = 6 - arg->bit_idx;
+	static const uint8_t reverse2_tables[] = {
+		[0b00] = 0b00,
+		[0b01] = 0b10,
+		[0b10] = 0b01,
+		[0b11] = 0b11,
+	};
 
-		u &= 0b11;
-		arg->buf[arg->byte_idx] |= (u << lshift);
+	if (arg->byte_idx < arg->bufsz) {
+		u = reverse2_tables[u & 0b11];
+
+		if (arg->bit_idx == 0)
+			arg->buf[arg->byte_idx] = 0;
+
+		arg->buf[arg->byte_idx] |= (u << arg->bit_idx);
 		arg->bit_idx += 2;
 
 		if (arg->bit_idx == 8) {
@@ -390,17 +418,17 @@ static int wisun_fsk_encode_nrnsc(const char *str01)
 	arg.buf = encode_buf;
 	arg.bufsz = sizeof(encode_buf);
 
-	binary_size = strict_str01_to_buffer(str01, buf, sizeof(buf), 0);
+	binary_size = strict_str01_to_buffer(str01, buf, sizeof(buf), 1);
 	if (!binary_size)
 		return -1;
 
-	foreach_bit_in_msbfirst_buffer(buf, binary_size,
+	foreach_bit_in_buffer_lsbfirst(buf, binary_size,
 				       wisun_2fsk_nrnsc_input_bit, &arg);
 
 	if (option_hexo)
 		print_hex_bytes(encode_buf, roundup8(arg.encode_bits));
 	else
-		print_binary_bits_msbfirst(encode_buf, 0, arg.encode_bits - 1,
+		print_binary_bits_lsbfirst(encode_buf, 0, arg.encode_bits - 1,
 					   group_count);
 	printf("\n");
 
@@ -417,17 +445,17 @@ static int wisun_fsk_encode_rsc(const char *str01)
 	arg.buf = encode_buf;
 	arg.bufsz = sizeof(encode_buf);
 
-	binary_size = strict_str01_to_buffer(str01, buf, sizeof(buf), 0);
+	binary_size = strict_str01_to_buffer(str01, buf, sizeof(buf), 1);
 	if (!binary_size)
 		return -1;
 
-	foreach_bit_in_msbfirst_buffer(buf, binary_size,
+	foreach_bit_in_buffer_lsbfirst(buf, binary_size,
 				       wisun_2fsk_rsc_input_bit, &arg);
 
 	if (option_hexo)
 		print_hex_bytes(encode_buf, roundup8(arg.encode_bits));
 	else
-		print_binary_bits_msbfirst(encode_buf, 0,
+		print_binary_bits_lsbfirst(encode_buf, 0,
 					   arg.encode_bits - 1,
 					   group_count);
 	printf("\n");
@@ -441,7 +469,7 @@ static int wisun_fsk_interleaving(const char *str01)
 	uint8_t buf[4096] = { 0 };
 	size_t binary_size;
 
-	binary_size = strict_str01_to_buffer(str01, buf, sizeof(buf), 0);
+	binary_size = strict_str01_to_buffer(str01, buf, sizeof(buf), 1);
 	if (!binary_size)
 		return -1;
 
@@ -456,8 +484,9 @@ static int wisun_fsk_interleaving(const char *str01)
 	if (option_hexo)
 		print_hex_bytes(buf, binary_size / 8);
 	else
-		print_binary_bits_msbfirst(buf, 0, binary_size - 1,
+		print_binary_bits_lsbfirst(buf, 0, binary_size - 1,
 					   group_count);
+	putchar('\n');
 
 	return 0;
 }
