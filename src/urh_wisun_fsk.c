@@ -11,6 +11,7 @@
 
 #define URH_WIRUN_FSK_PLUGIN_VERSION		"1.0.2"
 
+static int option_verbose = 0;
 static int option_human = 0;
 static int option_hexo = 0;
 
@@ -460,6 +461,17 @@ static int wisun_fsk_encode_rsc(const char *str01)
 					   group_count);
 	printf("\n");
 
+	if (option_verbose > 0) {
+		/* m.bit2 -> M0,
+		 * m.bit1 -> M1,
+		 * m.bit0 -> M2
+		 */
+		printf("Memory state(M0-M2): %d%d%d\n",
+			(arg.m >> 2) & 1,
+			(arg.m >> 1) & 1,
+			(arg.m >> 0) & 1);
+	}
+
 	return 0;
 }
 
@@ -754,6 +766,7 @@ enum {
 	OPTION_NRNSC,
 	OPTION_INTERLEAVING,
 	OPTION_HELP,
+	OPTION_VERBOSE,
 	OPTION_VERSION,
 	OPTION_DECODE,
 	OPTION_ENCODE,
@@ -770,6 +783,7 @@ static struct option long_options[] = {
 	{ "nrnsc",		no_argument,		NULL,		OPTION_NRNSC	},
 	{ "interleaving",	no_argument,		NULL,		OPTION_INTERLEAVING	},
 	{ "help",		no_argument,		NULL,		OPTION_HELP	},
+	{ "verbose",		no_argument,		NULL,		OPTION_VERBOSE	},
 	{ "version",		no_argument,		NULL,		OPTION_VERSION	},
 	{ "decode",		no_argument,		NULL,		OPTION_DECODE	},
 	{ "encode",		no_argument,		NULL,		OPTION_ENCODE	},
@@ -783,7 +797,8 @@ static void print_usage(void)
 {
 	fprintf(stderr, "Usage: urh_wisun_fsk [OPTIONS] \"binary-strings\"\n");
 	fprintf(stderr, "-h --help:              show this message\n");
-	fprintf(stderr, "-v --version:           show plugin version\n");
+	fprintf(stderr, "-V --version:           show plugin version\n");
+	fprintf(stderr, "-v --verbose:           verbose mode\n");
 	fprintf(stderr, "-d --decode:            decode a wisun 2-fsk packet\n");
 	fprintf(stderr, "-e --encode:            encode a wisun 2-fsk packet\n");
 	fprintf(stderr, "   --hexo:              print the encode/decode result in hex mode\n");
@@ -847,10 +862,66 @@ static void test_wisun_2fsk_str01_find_shr(void)
 	assert(type == WISUN_2FSK_SFD_UNCODED0);
 }
 
+static void test_rsc_input_bit(void)
+{
+	struct wisun_2fsk_fec_encoder arg = { .m = RSC_INIT_M };
+	uint8_t buf[2] = { 0x11, 0x22 }, encode_buf[sizeof(buf) * 2];
+	const uint8_t expected[sizeof(encode_buf)] = { 0x17, 0x03, 0x5c, 0x0c };
+
+	memset(encode_buf, 0, sizeof(encode_buf));
+	memset(&arg, 0, sizeof(arg));
+	arg.buf = encode_buf;
+	arg.bufsz = sizeof(encode_buf);
+
+	foreach_bit_in_buffer_lsbfirst(buf, sizeof(buf) * 8,
+				       wisun_2fsk_rsc_input_bit, &arg);
+	assert(memcmp(encode_buf, expected, sizeof(expected)) == 0);
+
+	memset(encode_buf, 0, sizeof(encode_buf));
+	memset(&arg, 0, sizeof(arg));
+	arg.buf = encode_buf;
+	arg.bufsz = sizeof(encode_buf);
+
+	foreach_bit_in_buffer_lsbfirst(&buf[0], 8,
+				       wisun_2fsk_rsc_input_bit, &arg);
+	foreach_bit_in_buffer_lsbfirst(&buf[1], 8,
+				       wisun_2fsk_rsc_input_bit, &arg);
+	assert(memcmp(encode_buf, expected, sizeof(expected)) == 0);
+}
+
+static void test_nrnsc_input_bit(void)
+{
+	struct wisun_2fsk_fec_encoder arg = { .m = RSC_INIT_M };
+	uint8_t buf[2] = { 0x11, 0x22 }, encode_buf[sizeof(buf) * 2];
+	const uint8_t expected[sizeof(encode_buf)] = { 0x04, 0x04, 0x13, 0x10 };
+
+	memset(encode_buf, 0, sizeof(encode_buf));
+	memset(&arg, 0, sizeof(arg));
+	arg.buf = encode_buf;
+	arg.bufsz = sizeof(encode_buf);
+
+	foreach_bit_in_buffer_lsbfirst(buf, sizeof(buf) * 8,
+				       wisun_2fsk_nrnsc_input_bit, &arg);
+	assert(memcmp(encode_buf, expected, sizeof(expected)) == 0);
+
+	memset(encode_buf, 0, sizeof(encode_buf));
+	memset(&arg, 0, sizeof(arg));
+	arg.buf = encode_buf;
+	arg.bufsz = sizeof(encode_buf);
+
+	foreach_bit_in_buffer_lsbfirst(&buf[0], 8,
+				       wisun_2fsk_nrnsc_input_bit, &arg);
+	foreach_bit_in_buffer_lsbfirst(&buf[1], 8,
+				       wisun_2fsk_nrnsc_input_bit, &arg);
+	assert(memcmp(encode_buf, expected, sizeof(expected)) == 0);
+}
+
 static void self_test(void)
 {
 	test_str01_strstr();
 	test_wisun_2fsk_str01_find_shr();
+	test_rsc_input_bit();
+	test_nrnsc_input_bit();
 }
 #endif
 
@@ -867,7 +938,7 @@ int main(int argc, char **argv)
 		int option_index = 0;
 		int c;
 
-		c = getopt_long(argc, argv, "hv", long_options, &option_index);
+		c = getopt_long(argc, argv, "hvVde", long_options, &option_index);
 		if (c == -1)
 			break;
 
@@ -888,17 +959,25 @@ int main(int argc, char **argv)
 			algo = ALGO_INTERLEAVING;
 			break;
 
+		case 'v':
+		case OPTION_VERBOSE:
+			option_verbose++;
+			break;
 		case 'h':
 		case OPTION_HELP:
 			print_usage();
 			return 0;
-		case 'v':
+		case 'V':
 		case OPTION_VERSION:
 			printf("version: %s\n", URH_WIRUN_FSK_PLUGIN_VERSION);
 			return 0;
 		case OPTION_DECODE:
 		case OPTION_ENCODE:
 			decode = c == OPTION_DECODE;
+			break;
+		case 'd':
+		case 'e':
+			decode = c == 'd';
 			break;
 		case OPTION_HEXO: /* hex output */
 			option_hexo = 1;
