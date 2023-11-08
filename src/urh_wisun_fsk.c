@@ -868,6 +868,7 @@ static int wisun_2fsk_packet_encode(const char *arg,
 				    size_t preamble_sz,
 				    enum wisun_2fsk_sfd_type type,
 				    uint16_t phr_options,
+				    int use_rsc,
 				    int interleaving)
 {
 	size_t group_sz = option_human ? 4 : 0;
@@ -924,7 +925,7 @@ static int wisun_2fsk_packet_encode(const char *arg,
 		printf("Input:\n");
 		print_binary_bits_lsbfirst(&data[data_idx], 0,
 					   frame_length * 8 - 1,
-					   4);
+					   group_sz);
 		putchar('\n');
 	}
 
@@ -954,13 +955,15 @@ static int wisun_2fsk_packet_encode(const char *arg,
 		printf("PHR, DATA, CRC:\n");
 		print_binary_bits_lsbfirst(data, 0,
 					   (frame_length + sizeof(phr)) * 8 - 1,
-					   4);
+					   group_sz);
 		putchar('\n');
 	}
 
+	if (type != WISUN_2FSK_SFD_CODED0 && type != WISUN_2FSK_SFD_CODED1)
+		goto push_data;
+
 	/* encode it */
-	switch (type) {
-	case WISUN_2FSK_SFD_CODED0:
+	if (use_rsc) {
 		encoder.m = RSC_INIT_M;
 		foreach_bit_in_buffer_lsbfirst(data, data_idx * 8,
 					       wisun_2fsk_rsc_input_bit,
@@ -978,8 +981,7 @@ static int wisun_2fsk_packet_encode(const char *arg,
 		foreach_bit_in_buffer_lsbfirst(pad, pad_sz * 8,
 					       wisun_2fsk_rsc_input_bit,
 					       &encoder);
-		break;
-	case WISUN_2FSK_SFD_CODED1:
+	} else {
 		encoder.m = NRNSC_INIT_M;
 		foreach_bit_in_buffer_lsbfirst(data, data_idx * 8,
 					       wisun_2fsk_nrnsc_input_bit,
@@ -989,17 +991,15 @@ static int wisun_2fsk_packet_encode(const char *arg,
 		foreach_bit_in_buffer_lsbfirst(pad, pad_sz * 8,
 					       wisun_2fsk_nrnsc_input_bit,
 					       &encoder);
-		break;
-	default:
-		break;
 	}
 
 	if (option_verbose > 0 && pad_sz > 0) {
 		printf("Padding:\n");
-		print_binary_bits_lsbfirst(pad, 0, pad_sz * 8 - 1, 4);
+		print_binary_bits_lsbfirst(pad, 0, pad_sz * 8 - 1, group_sz);
 		putchar('\n');
 	}
 
+push_data:
 	switch (type) {
 	case WISUN_2FSK_SFD_CODED0:
 	case WISUN_2FSK_SFD_CODED1:
@@ -1010,7 +1010,7 @@ static int wisun_2fsk_packet_encode(const char *arg,
 			printf("After Convolutional:\n");
 			print_binary_bits_lsbfirst(encoder.buf, 0,
 						   encoder.encode_bits - 1,
-						   4);
+						   group_sz);
 			putchar('\n');
 		}
 
@@ -1022,7 +1022,7 @@ static int wisun_2fsk_packet_encode(const char *arg,
 			if (option_verbose > 0) {
 				printf("After Interleaving:\n");
 				print_binary_bits_lsbfirst(p_frame, 0,
-					encoder.encode_bits - 1, 4);
+					encoder.encode_bits - 1, group_sz);
 				putchar('\n');
 			}
 		}
@@ -1045,7 +1045,7 @@ static int wisun_2fsk_packet_encode(const char *arg,
 			printf("After Whitening:\n");
 			print_binary_bits_lsbfirst(p_frame, 0,
 						   encoder.encode_bits - 1,
-						   4);
+						   group_sz);
 			putchar('\n');
 		}
 	}
@@ -1376,6 +1376,7 @@ int main(int argc, char **argv)
 
 	if (algo_masks == 0 || algo_masks & (1 << ALGO_PACKET)) {
 		int interleaving = !!(algo_masks & (1 << ALGO_INTERLEAVING));
+		int use_rsc = !!(algo_masks & (1 << ALGO_RSC));
 
 		if (decode)
 			ret = wisun_2fsk_packet_decode(argv[optind],
@@ -1385,6 +1386,7 @@ int main(int argc, char **argv)
 						       packet_encode_preamble_sz,
 						       sfd_type,
 						       phr_options,
+						       use_rsc,
 						       interleaving);
 	} else if (algo_masks & (1 << ALGO_PN9)) {
 		ret = wisun_fsk_pn9_encode_data_payload(argv[optind]);

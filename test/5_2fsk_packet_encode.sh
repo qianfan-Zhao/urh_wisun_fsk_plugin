@@ -91,6 +91,7 @@ encode_test "02006a" \
             "--packet" \
             "--preamble-size" "32" \
             "--sfd" "coded1" \
+            "--nrnsc" \
             "--interleaving" \
             "--human" \
             || exit $?
@@ -106,6 +107,7 @@ encode_test "02006a" \
             "--packet" \
             "--preamble-size" "32" \
             "--sfd" "coded0" \
+            "--rsc" \
             "--interleaving" \
             "--whitening" \
             "--human" \
