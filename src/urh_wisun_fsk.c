@@ -529,6 +529,47 @@ static int wisun_fsk_encode_rsc(const char *str01)
 	return 0;
 }
 
+static int wisun_fsk_fec_decode(int use_rsc, const char *str01)
+{
+	uint8_t decode[1024], buf[sizeof(decode) * 2];
+	size_t group_sz = option_human ? 4 : 0;
+	size_t binary_size, decode_bits;
+	uint8_t m;
+	int ret;
+
+	binary_size = strict_str01_to_buffer(str01, buf, sizeof(buf), 1);
+	if (!binary_size)
+		return -1;
+
+	if (binary_size & 1) {
+		fprintf(stderr, "The input is not aligned 2bit\n");
+		return -1;
+	}
+
+	if (use_rsc) {
+		m = RSC_INIT_M;
+		ret = rsc_decode(&m, buf, binary_size, decode, sizeof(decode),
+				 &decode_bits);
+	} else {
+		m = NRNSC_INIT_M;
+		ret = nrnsc_decode(&m, buf, binary_size, decode, sizeof(decode),
+				   &decode_bits);
+	}
+
+	if (ret < 0) {
+		fprintf(stderr, "decode failed\n");
+		return ret;
+	}
+
+	if (option_hexo)
+		print_hex_bytes(decode, roundup8(decode_bits));
+	else
+		print_binary_bits_lsbfirst(decode, 0, decode_bits - 1, group_sz);
+	printf("\n");
+
+	return 0;
+}
+
 static int wisun_fsk_interleaving(const char *str01)
 {
 	size_t group_count = option_human ? 4 : 0;
@@ -1258,7 +1299,7 @@ int main(int argc, char **argv)
 	enum wisun_2fsk_sfd_type sfd_type = WISUN_2FSK_SFD_UNCODED0;
 	size_t packet_encode_preamble_sz = 64;
 	uint16_t phr_options = 0;
-	int decode = 1, skip_verify = 0;
+	int decode = -1, skip_verify = 0;
 	int ret = -1;
 
 #if DEBUG > 0
@@ -1378,7 +1419,8 @@ int main(int argc, char **argv)
 		int interleaving = !!(algo_masks & (1 << ALGO_INTERLEAVING));
 		int use_rsc = !!(algo_masks & (1 << ALGO_RSC));
 
-		if (decode)
+		/* the default behavier is decode */
+		if (decode != 0)
 			ret = wisun_2fsk_packet_decode(argv[optind],
 						       skip_verify);
 		else
@@ -1391,9 +1433,17 @@ int main(int argc, char **argv)
 	} else if (algo_masks & (1 << ALGO_PN9)) {
 		ret = wisun_fsk_pn9_encode_data_payload(argv[optind]);
 	} else if (algo_masks & (1 << ALGO_NRNSC)) {
-		ret = wisun_fsk_encode_nrnsc(argv[optind]);
+		/* the default behavier is encode */
+		if (decode < 0 || decode == 0)
+			ret = wisun_fsk_encode_nrnsc(argv[optind]);
+		else
+			ret = wisun_fsk_fec_decode(0, argv[optind]);
 	} else if (algo_masks & (1 << ALGO_RSC)) {
-		ret = wisun_fsk_encode_rsc(argv[optind]);
+		/* the default behaiver is encode */
+		if (decode < 0 || decode == 0)
+			ret = wisun_fsk_encode_rsc(argv[optind]);
+		else
+			ret = wisun_fsk_fec_decode(1, argv[optind]);
 	} else if (algo_masks & (1 << ALGO_INTERLEAVING)) {
 		ret = wisun_fsk_interleaving(argv[optind]);
 	}

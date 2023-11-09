@@ -178,25 +178,117 @@ struct fec_table {
 	uint8_t		u1u0;
 };
 
+static uint8_t bufin_peek_2bit_lsbfirst(uint8_t *bufin, size_t *bufin_bit_idx)
+{
+	size_t bit_idx, byte_idx;
+
+	bit_idx = *bufin_bit_idx;
+	(*bufin_bit_idx) += 2;
+
+	byte_idx = bit_idx / 8;
+	bit_idx = bit_idx % 8;
+
+	return (bufin[byte_idx] >> bit_idx) & 0b11;
+}
+
+static int bufout_push_1bit_lsbfirst(uint8_t *bufout, size_t bufout_size,
+				     size_t *bufout_bit_idx, int bi)
+{
+	size_t bit_idx, byte_idx;
+
+	bit_idx = *bufout_bit_idx;
+	byte_idx = bit_idx / 8;
+	bit_idx = bit_idx % 8;
+
+	if (byte_idx < bufout_size) {
+		if (bit_idx == 0)
+			bufout[byte_idx] = 0;
+
+		(*bufout_bit_idx) += 1;
+		bufout[byte_idx] |= (bi << bit_idx);
+		return 0;
+	}
+
+	return -1;
+}
+
+/* Assume the encode buf is good, no error bit inside */
+static int fec_replay_decode(struct fec_table one[8], struct fec_table zero[8],
+			     uint8_t *p_m,
+			     uint8_t *encode_buf, size_t encode_bits,
+			     uint8_t *out_buf, size_t out_buf_sz,
+			     size_t *ret_out_bits)
+{
+	static const uint8_t reverse2_tables[] = {
+		[0b00] = 0b00,
+		[0b01] = 0b10,
+		[0b10] = 0b01,
+		[0b11] = 0b11,
+	};
+	size_t in_bit_idx = 0;
+	uint8_t m = *p_m;
+	int ret = 0;
+
+	*ret_out_bits = 0;
+	encode_bits &= ~1; /* aligned */
+
+	while (in_bit_idx < encode_bits) {
+		uint8_t symbol;
+		int bi = -1;
+
+		symbol = bufin_peek_2bit_lsbfirst(encode_buf, &in_bit_idx);
+		symbol = reverse2_tables[symbol];
+
+		if (one[m].u1u0 == symbol) {
+			m = one[m].next_m;
+			bi = 1;
+		} else if (zero[m].u1u0 == symbol) {
+			m = zero[m].next_m;
+			bi = 0;
+		}
+
+		if (bi < 0) { /* decode failed */
+			ret = bi;
+			goto done;
+		}
+
+		bufout_push_1bit_lsbfirst(out_buf, out_buf_sz,
+					  ret_out_bits, bi);
+	}
+
+done:
+	*p_m = m;
+	return ret;
+}
+
+static struct fec_table rsc_tables_zero[8], rsc_tables_one[8];
+static int rsc_table_inited = 0;
+
+#define init_rsc_tables_once() do {					\
+	if (!rsc_table_inited) {					\
+		rsc_table_inited = 1;					\
+		rsc_init_fec_table(rsc_tables_zero, rsc_tables_one);	\
+	}								\
+} while (0)
+
+static void rsc_init_fec_table(struct fec_table zero[8],
+			       struct fec_table one[8])
+{
+	for (uint8_t i = 0; i < 8; i++) {
+		zero[i].m = zero[i].next_m = i;
+		one[i].m = one[i].next_m = i;
+
+		zero[i].u1u0 = sw_rsc_input_bit(&zero[i].next_m, 0);
+		one[i].u1u0 = sw_rsc_input_bit(&one[i].next_m, 1);
+	}
+}
+
 uint8_t rsc_input_bit(uint8_t *m, int bi)
 {
-	static struct fec_table rsc_tables_zero[8], rsc_tables_one[8];
-	static int rsc_table_inited = 0;
 	struct fec_table *table;
 	uint8_t u;
 
-	if (!rsc_table_inited) {
-		rsc_table_inited = 1;
-		for (uint8_t i = 0; i < 8; i++) {
-			rsc_tables_zero[i].m = rsc_tables_zero[i].next_m = i;
-			rsc_tables_one[i].m = rsc_tables_one[i].next_m = i;
-
-			rsc_tables_zero[i].u1u0 =
-				sw_rsc_input_bit(&rsc_tables_zero[i].next_m, 0);
-			rsc_tables_one[i].u1u0 =
-				sw_rsc_input_bit(&rsc_tables_one[i].next_m, 1);
-		}
-	}
+	init_rsc_tables_once();
 
 	if (bi)
 		table = &rsc_tables_one[*m & 0b111];
@@ -207,6 +299,20 @@ uint8_t rsc_input_bit(uint8_t *m, int bi)
 	*m = table->next_m;
 
 	return u;
+}
+
+int rsc_decode(uint8_t *m, uint8_t *encode_buf, size_t encode_bits,
+	       uint8_t *out_buf, size_t out_buf_sz, size_t *ret_decode_bits)
+{
+	int ret;
+
+	init_rsc_tables_once();
+
+	ret = fec_replay_decode(rsc_tables_one, rsc_tables_zero, m,
+				encode_buf, encode_bits, out_buf, out_buf_sz,
+				ret_decode_bits);
+
+	return ret;
 }
 
 /* NRNSC encode for wisun fsk, defined in <802.15.4-2020.pdf> */
@@ -244,17 +350,23 @@ static void nrnsc_init_fec_table(struct fec_table zero[8],
 	}
 }
 
+static struct fec_table nrnsc_tables_zero[8], nrnsc_tables_one[8];
+static int nrnsc_table_inited = 0;
+
+#define init_nrnsc_tables_once() do {					\
+	if (!nrnsc_table_inited) {					\
+		nrnsc_table_inited = 1;					\
+		nrnsc_init_fec_table(nrnsc_tables_zero, 		\
+				     nrnsc_tables_one);			\
+	}								\
+} while (0)
+
 uint8_t nrnsc_input_bit(uint8_t *m, int bi)
 {
-	static struct fec_table nrnsc_tables_zero[8], nrnsc_tables_one[8];
-	static int nrnsc_table_inited = 0;
 	struct fec_table *table;
 	uint8_t u;
 
-	if (!nrnsc_table_inited) {
-		nrnsc_table_inited = 1;
-		nrnsc_init_fec_table(nrnsc_tables_zero, nrnsc_tables_one);
-	}
+	init_nrnsc_tables_once();
 
 	if (bi)
 		table = &nrnsc_tables_one[*m & 0b111];
@@ -265,6 +377,20 @@ uint8_t nrnsc_input_bit(uint8_t *m, int bi)
 	*m = table->next_m;
 
 	return u;
+}
+
+int nrnsc_decode(uint8_t *m, uint8_t *encode_buf, size_t encode_bits,
+		 uint8_t *out_buf, size_t out_buf_sz, size_t *ret_decode_bits)
+{
+	int ret;
+
+	init_nrnsc_tables_once();
+
+	ret = fec_replay_decode(nrnsc_tables_one, nrnsc_tables_zero, m,
+				encode_buf, encode_bits, out_buf, out_buf_sz,
+				ret_decode_bits);
+
+	return ret;
 }
 
 /*

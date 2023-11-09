@@ -37,6 +37,11 @@ void pn9_payload_decode(uint8_t *buf, size_t byte_size);
 uint8_t rsc_input_bit(uint8_t *m, int bi);
 uint8_t nrnsc_input_bit(uint8_t *m, int bi);
 
+int rsc_decode(uint8_t *m, uint8_t *encode_buf, size_t encode_bits,
+	       uint8_t *out_buf, size_t out_buf_sz, size_t *ret_decode_bits);
+int nrnsc_decode(uint8_t *m, uint8_t *encode_buf, size_t encode_bits,
+		 uint8_t *out_buf, size_t out_buf_sz, size_t *ret_decode_bits);
+
 void interleaving_bits(const uint8_t *buf, size_t binary_bits, uint8_t *out);
 
 uint16_t ieee_802154_fcs16(uint16_t crc, const uint8_t *buf, size_t sz);
