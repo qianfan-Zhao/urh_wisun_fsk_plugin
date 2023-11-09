@@ -10,8 +10,14 @@ features:
 | feature        | encode | decode |
 | -------------- | ------ | ------ |
 | data whitening | x      | x      |
-| RSC            | x      | !      |
-| NRNSC          | x      | !      |
+| RSC            | x      | x      |
+| NRNSC          | x      | x      |
 | interleaving   | x      | x      |
 
 More command line examples, please reference [test](./test) cases.
+
+Note:
+
+At present the viterbi decoding algorithm has not been implemented, we use
+a very pool decoding method named as `fec_replay_decode` instead, and we can
+not fix the error bit now.
