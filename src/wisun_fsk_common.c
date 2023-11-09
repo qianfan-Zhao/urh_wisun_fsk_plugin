@@ -172,7 +172,7 @@ static uint8_t sw_rsc_input_bit(uint8_t *m, int bi)
 	return (u1 << 1) | u0;
 }
 
-struct rsc_table {
+struct fec_table {
 	uint8_t		m;
 	uint8_t		next_m;
 	uint8_t		u1u0;
@@ -180,9 +180,9 @@ struct rsc_table {
 
 uint8_t rsc_input_bit(uint8_t *m, int bi)
 {
-	static struct rsc_table rsc_tables_zero[8], rsc_tables_one[8];
+	static struct fec_table rsc_tables_zero[8], rsc_tables_one[8];
 	static int rsc_table_inited = 0;
-	struct rsc_table *table;
+	struct fec_table *table;
 	uint8_t u;
 
 	if (!rsc_table_inited) {
@@ -210,43 +210,61 @@ uint8_t rsc_input_bit(uint8_t *m, int bi)
 }
 
 /* NRNSC encode for wisun fsk, defined in <802.15.4-2020.pdf> */
-static uint8_t nrnsc_tables[16] = { 0 };
-
-static void nrnsc_table_init(void)
+static uint8_t sw_nrnsc_input_bit(uint8_t *m, int bi)
 {
+	uint8_t bi1, bi2, bi3;
+	uint8_t u1, u0;
+
 	/* bi = bit3, bi1 = bit2 ... bi3 = bit0
 	 *
 	 * u0 = bi ^ bi1 ^ bi2 ^ bi3 ^ 1
 	 * u1 = bi ^ bi2 ^ bi3 ^ 1
 	 * table[i] = (u1 << 1) | u0
 	 */
-	for (size_t i = 0; i < sizeof(nrnsc_tables); i++) {
-		uint8_t bi, bi1, bi2, bi3;
-		uint8_t u1, u0;
+	bi1 = (*m >> 2) & 1;
+	bi2 = (*m >> 1) & 1;
+	bi3 = (*m >> 0) & 1;
 
-		bi =  (i >> 3) & 1;
-		bi1 = (i >> 2) & 1;
-		bi2 = (i >> 1) & 1;
-		bi3 = (i >> 0) & 1;
+	u0 = bi ^ bi1 ^ bi2 ^ bi3 ^ 1;
+	u1 = bi ^ bi2 ^ bi3 ^ 1;
 
-		u0 = bi ^ bi1 ^ bi2 ^ bi3 ^ 1;
-		u1 = bi ^ bi2 ^ bi3 ^ 1;
+	*m = (*m >> 1) | (bi << 2);
+	return (u1 << 1) | u0;
+}
 
-		nrnsc_tables[i] = (u1 << 1) | u0;
+static void nrnsc_init_fec_table(struct fec_table zero[8],
+				 struct fec_table one[8])
+{
+	for (uint8_t i = 0; i < 8; i++) {
+		zero[i].m = zero[i].next_m = i;
+		one[i].m = one[i].next_m = i;
+
+		zero[i].u1u0 = sw_nrnsc_input_bit(&zero[i].next_m, 0);
+		one[i].u1u0 = sw_nrnsc_input_bit(&one[i].next_m, 1);
 	}
 }
 
 uint8_t nrnsc_input_bit(uint8_t *m, int bi)
 {
+	static struct fec_table nrnsc_tables_zero[8], nrnsc_tables_one[8];
 	static int nrnsc_table_inited = 0;
+	struct fec_table *table;
+	uint8_t u;
 
 	if (!nrnsc_table_inited) {
 		nrnsc_table_inited = 1;
-		nrnsc_table_init();
+		nrnsc_init_fec_table(nrnsc_tables_zero, nrnsc_tables_one);
 	}
 
-	*m = (((*m) >> 1) | (bi << 3)) & 0x0f;
-	return nrnsc_tables[*m];
+	if (bi)
+		table = &nrnsc_tables_one[*m & 0b111];
+	else
+		table = &nrnsc_tables_zero[*m & 0b111];
+
+	u = table->u1u0;
+	*m = table->next_m;
+
+	return u;
 }
 
 /*
