@@ -11,7 +11,7 @@
 #include <ctype.h>
 #include "wisun_fsk_common.h"
 
-#define URH_WIRUN_FSK_PLUGIN_VERSION		"1.0.3"
+#define URH_WIRUN_FSK_PLUGIN_VERSION		"1.0.4"
 
 #define number_is_even(n)			(((n) & 1) == 0)
 
@@ -729,7 +729,7 @@ static uint16_t wisun_2fsk_make_phr(unsigned int options, uint16_t frame_length)
 }
 
 static int wisun_2fsk_packet_recovery(uint8_t *p_sfd, size_t binary_size,
-				      int skip_verify,
+				      int skip_whitening, int skip_verify,
 				      size_t *ret_frame_length)
 {
 	uint16_t phr, frame_length;
@@ -750,7 +750,7 @@ static int wisun_2fsk_packet_recovery(uint8_t *p_sfd, size_t binary_size,
 	if (binary_size < frame_length * 8)
 		return -1;
 
-	if (phr & WISUN_2FSK_PHR_DATA_WHITENING)
+	if (skip_whitening == 0 && (phr & WISUN_2FSK_PHR_DATA_WHITENING))
 		pn9_payload_decode(p, frame_length);
 
 	if (!skip_verify) {
@@ -768,7 +768,6 @@ static int wisun_2fsk_packet_recovery(uint8_t *p_sfd, size_t binary_size,
 	*ret_frame_length = frame_length;
 	return 0;
 }
-
 
 static void wisun_2fsk_print_packet(const uint8_t *buf, size_t binary_size,
 				    size_t preamble_sz,
@@ -828,11 +827,13 @@ static void wisun_2fsk_print_packet(const uint8_t *buf, size_t binary_size,
 	printf("\n");
 }
 
-static int wisun_2fsk_packet_decode(const char *str01, int skip_verify)
+static int wisun_2fsk_packet_decode(const char *str01, int use_rsc,
+				    int interleaving, int skip_verify)
 {
 	size_t preamble_sz, binary_size, byte_size, frame_len;
 	enum wisun_2fsk_sfd_type type;
 	uint8_t buf[8192] = { 0 };
+	int skip_whitening = 0;
 	const char *endp;
 	int idx, ret;
 
@@ -853,18 +854,155 @@ static int wisun_2fsk_packet_decode(const char *str01, int skip_verify)
 	if (binary_size % 8)
 		byte_size++;
 
+	if (type == WISUN_2FSK_SFD_CODED0 || type == WISUN_2FSK_SFD_CODED1) {
+		uint8_t *p_phy_payload, *p_whitening;
+		size_t phy_payload_sz, whitening_sz, pad_sz;
+		size_t decode_bits = 0;
+		uint16_t phr, phr_frame_length;
+		uint8_t m;
+		int ret;
+
+		p_phy_payload = buf + preamble_sz / 8 + 2 /* sfd */;
+		phy_payload_sz = byte_size - (p_phy_payload - buf);
+
+		/* phr is 2bytes, it will become 4bytes after convolutional */
+		p_whitening = p_phy_payload + sizeof(phr) * 2;
+		whitening_sz = byte_size - (p_whitening - buf);
+
+		if (phy_payload_sz <= sizeof(phr) * 2)
+			return -1;
+
+		/* recovery phr first */
+		if (interleaving)
+			interleaving_bits(p_phy_payload, sizeof(phr) * 2 * 8,
+					  p_phy_payload);
+
+		if (use_rsc) {
+			m = RSC_INIT_M;
+
+			ret = rsc_decode(&m, p_phy_payload,
+					 sizeof(phr) * 2 * 8,
+					 (uint8_t *)&phr, sizeof(phr),
+					 &decode_bits);
+		} else {
+			m = NRNSC_INIT_M;
+
+			ret = nrnsc_decode(&m, p_phy_payload,
+					   sizeof(phr) * 2 * 8,
+					   (uint8_t *)&phr, sizeof(phr),
+					   &decode_bits);
+		}
+
+		if (ret < 0) {
+			fprintf(stderr, "Error: decode PHR failed\n");
+			return ret;
+		}
+
+		if (option_verbose > 0) {
+			printf("PHR: ");
+			print_binary_bits_lsbfirst((uint8_t *)&phr, 0,
+						   sizeof(phr) * 8 - 1, 0);
+			putchar('\n');
+		}
+
+		memcpy(p_phy_payload, &phr, sizeof(phr));
+
+		phr = wisun_2fsk_fix_phr_order(phr);
+		phr_frame_length = phr >> 5; /* the frame length saved in phr */
+		pad_sz = number_is_even(sizeof(phr) + phr_frame_length) ? 2 : 1;
+
+		whitening_sz = phr_frame_length + pad_sz;
+		/* the length will be double after convolutional */
+		whitening_sz *= 2;
+
+		if (phr & WISUN_2FSK_PHR_DATA_WHITENING) {
+			pn9_payload_decode(p_whitening, whitening_sz);
+			if (option_verbose > 0) {
+				printf("After Whitening decode:\n");
+				print_binary_bits_lsbfirst(p_whitening, 0,
+					whitening_sz * 8 - 1, 0);
+				putchar('\n');
+			}
+		}
+
+		/* continue recovery whitening bytes */
+		decode_bits = 0;
+		if (interleaving) {
+			interleaving_bits(p_whitening, whitening_sz * 8,
+					  p_whitening);
+			if (option_verbose > 0) {
+				printf("After Interleaving decode:\n");
+				print_binary_bits_lsbfirst(p_whitening, 0,
+						whitening_sz * 8 - 1, 0);
+				putchar('\n');
+			}
+		}
+
+		if (use_rsc) {
+			ret = rsc_decode(&m, p_whitening,
+					 whitening_sz * 8,
+					 p_phy_payload + sizeof(phr),
+					 sizeof(buf) - (p_phy_payload - buf)
+					 - sizeof(phr),
+					 &decode_bits);
+		} else {
+			ret = nrnsc_decode(&m, p_whitening,
+					   whitening_sz * 8,
+					   p_phy_payload + sizeof(phr),
+					   sizeof(buf) - (p_phy_payload - buf)
+					   - sizeof(phr),
+					   &decode_bits);
+		}
+
+		if (ret < 0) {
+			fprintf(stderr, "Error: decode PHY payload failed\n");
+			return ret;
+		}
+
+		if (option_verbose) {
+			uint8_t *p_data = p_phy_payload + sizeof(phr);
+			uint8_t *p_pad = p_data + phr_frame_length;
+
+			printf("After Convolutional decode:\n");
+			print_binary_bits_lsbfirst(p_data,
+						   0,
+						   phr_frame_length * 8 - 1,
+						   0);
+			printf("(");
+			print_binary_bits_lsbfirst(p_pad, 0, pad_sz * 8 - 1, 0);
+			printf(")");
+
+			putchar('\n');
+		}
+
+		frame_len = sizeof(phr) + phr_frame_length;
+		binary_size = preamble_sz + (2 /* sfd */ + frame_len) * 8;
+		skip_whitening = 1;
+
+		if (option_verbose > 0) {
+			printf("After decode:\n");
+			print_binary_bits_lsbfirst(p_phy_payload, 0,
+						   frame_len * 8 - 1, 0);
+			putchar('\n');
+		}
+	}
+
 	/* frame_len: total number of octets contained in the PSDU.
 	 *            including PHY payload and CRC.
 	 *            doesn't include PHR.
 	 */
 	ret = wisun_2fsk_packet_recovery(buf + preamble_sz / 8,
 					 binary_size - preamble_sz,
+					 skip_whitening,
 					 skip_verify,
 					 &frame_len);
 	if (ret < 0) {
-		fprintf(stderr, "verify 802.15.4 packet failed\n");
+		fprintf(stderr, "Error: verify 802.15.4 packet failed\n");
 		return ret;
 	}
+
+	if (option_verbose > 0)
+		printf("After packet decode\n");
 
 	wisun_2fsk_print_packet(buf, binary_size, preamble_sz, type, frame_len);
 	return 0;
@@ -1422,6 +1560,8 @@ int main(int argc, char **argv)
 		/* the default behavier is decode */
 		if (decode != 0)
 			ret = wisun_2fsk_packet_decode(argv[optind],
+						       use_rsc,
+						       interleaving,
 						       skip_verify);
 		else
 			ret = wisun_2fsk_packet_encode(argv[optind],
