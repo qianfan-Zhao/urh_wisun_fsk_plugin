@@ -15,7 +15,7 @@ struct bufwrite {
 	uint8_t	*buf;
 	size_t	len;
 	size_t	size;
-	int	errno;
+	int	err;
 };
 
 void bufwrite_init(struct bufwrite *b, uint8_t *buf, size_t bufsize);

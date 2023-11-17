@@ -13,7 +13,7 @@ void bufwrite_init(struct bufwrite *b, uint8_t *buf, size_t bufsz)
 	b->buf = buf;
 	b->size = bufsz;
 	b->len = 0;
-	b->errno = 0;
+	b->err = 0;
 }
 
 uint8_t *bufwrite_push_data(struct bufwrite *b, const uint8_t *data, size_t sz)
@@ -24,7 +24,7 @@ uint8_t *bufwrite_push_data(struct bufwrite *b, const uint8_t *data, size_t sz)
 	if (remain < sz) {
 		size_t left = sz - remain;
 
-		b->errno -= left;
+		b->err -= left;
 		return NULL;
 	} else if (data && sz) {
 		memcpy(ptr, data, sz);
