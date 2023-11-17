@@ -11,7 +11,7 @@
 #include <ctype.h>
 #include "wisun_fsk_common.h"
 
-#define URH_WIRUN_FSK_PLUGIN_VERSION		"1.0.4"
+#define URH_WIRUN_FSK_PLUGIN_VERSION		"1.0.5"
 
 #define number_is_even(n)			(((n) & 1) == 0)
 
@@ -728,47 +728,9 @@ static uint16_t wisun_2fsk_make_phr(unsigned int options, uint16_t frame_length)
 	return (options & 0x1f) | reverse16(frame_length);
 }
 
-static int wisun_2fsk_packet_recovery(uint8_t *p_sfd, size_t binary_size,
-				      int skip_whitening, int skip_verify,
-				      size_t *ret_frame_length)
-{
-	uint16_t phr, frame_length;
-	uint8_t *p = p_sfd;
-
-	if (binary_size <= 32) /* bit length of SFD + PHR */
-		return -1;
-
-	/* skip sfd */
-	binary_size -= 16;
-	p += 2;
-
-	phr = wisun_2fsk_fix_phr_order(buffer_peek_u16_b1b0(p));
-	binary_size -= 16;
-	p += 2;
-
-	frame_length = phr >> 5;
-	if (binary_size < frame_length * 8)
-		return -1;
-
-	if (skip_whitening == 0 && (phr & WISUN_2FSK_PHR_DATA_WHITENING))
-		pn9_payload_decode(p, frame_length);
-
-	if (!skip_verify) {
-		bool good = false;
-
-		if (!(phr & WISUN_2FSK_PHR_FCS_TYPE_CRC16))
-			good = ieee_802154_fcs32_buf_is_good(p, frame_length);
-		else
-			fprintf(stderr, "warnning: FCS16 is not supported\n");
-
-		if (!good)
-			return -1;
-	}
-
-	*ret_frame_length = frame_length;
-	return 0;
-}
-
+/* @frame_length: the length saved in PHR, including data and crc,
+ *                but doesn't including PHR
+ */
 static void wisun_2fsk_print_packet(const uint8_t *buf, size_t binary_size,
 				    size_t preamble_sz,
 				    enum wisun_2fsk_sfd_type type,
@@ -830,12 +792,12 @@ static void wisun_2fsk_print_packet(const uint8_t *buf, size_t binary_size,
 static int wisun_2fsk_packet_decode(const char *str01, int use_rsc,
 				    int interleaving, int skip_verify)
 {
-	size_t preamble_sz, binary_size, byte_size, frame_len;
+	size_t preamble_sz, binary_size, byte_size, phy_payload_sz;
 	enum wisun_2fsk_sfd_type type;
-	uint8_t buf[8192] = { 0 };
-	int skip_whitening = 0;
+	uint8_t *p_phy_payload, buf[8192] = { 0 };
+	uint16_t phr;
 	const char *endp;
-	int idx, ret;
+	int idx;
 
 	idx = wisun_2fsk_str01_find_shr(str01, &preamble_sz, &type);
 	if (idx < 0) {
@@ -854,21 +816,23 @@ static int wisun_2fsk_packet_decode(const char *str01, int use_rsc,
 	if (binary_size % 8)
 		byte_size++;
 
+	/* phy_payload_sz: all data after sfd, including phr, data and crc */
+	p_phy_payload = buf + preamble_sz / 8 + 2 /* sfd */;
+	phy_payload_sz = byte_size - (p_phy_payload - buf);
+	if (phy_payload_sz <= sizeof(phr))
+		return -1;
+
 	if (type == WISUN_2FSK_SFD_CODED0 || type == WISUN_2FSK_SFD_CODED1) {
-		uint8_t *p_phy_payload, *p_whitening;
-		size_t phy_payload_sz, whitening_sz, pad_sz;
+		uint8_t *p_whitening;
+		size_t whitening_sz, pad_sz;
 		size_t decode_bits = 0;
-		uint16_t phr, phr_frame_length;
+		uint16_t phr_frame_length;
 		uint8_t m;
 		int ret;
-
-		p_phy_payload = buf + preamble_sz / 8 + 2 /* sfd */;
-		phy_payload_sz = byte_size - (p_phy_payload - buf);
 
 		/* phr is 2bytes, it will become 4bytes after convolutional */
 		p_whitening = p_phy_payload + sizeof(phr) * 2;
 		whitening_sz = byte_size - (p_whitening - buf);
-
 		if (phy_payload_sz <= sizeof(phr) * 2)
 			return -1;
 
@@ -975,36 +939,68 @@ static int wisun_2fsk_packet_decode(const char *str01, int use_rsc,
 			putchar('\n');
 		}
 
-		frame_len = sizeof(phr) + phr_frame_length;
-		binary_size = preamble_sz + (2 /* sfd */ + frame_len) * 8;
-		skip_whitening = 1;
+		/* fix the phy_payload_sz based on PHR */
+		phy_payload_sz = sizeof(phr) + phr_frame_length;
 
 		if (option_verbose > 0) {
 			printf("After decode:\n");
 			print_binary_bits_lsbfirst(p_phy_payload, 0,
-						   frame_len * 8 - 1, 0);
+						   phy_payload_sz * 8 - 1, 0);
 			putchar('\n');
 		}
+	} else {
+		uint16_t phr_frame_length;
+
+		phr = wisun_2fsk_fix_phr_order(
+				buffer_peek_u16_b1b0(p_phy_payload));
+		phr_frame_length = phr >> 5;
+
+		if (phy_payload_sz < sizeof(phr) + phr_frame_length)
+			return -1;
+
+		if (phr & WISUN_2FSK_PHR_DATA_WHITENING) {
+			pn9_payload_decode(p_phy_payload + sizeof(phr),
+					   phr_frame_length);
+
+			if (option_verbose > 0) {
+				printf("After Whitening decode:\n");
+				print_binary_bits_lsbfirst(
+					p_phy_payload + sizeof(phr),
+					0,
+					phr_frame_length * 8 - 1,
+					0);
+				putchar('\n');
+			}
+		}
+
+		/* fix phy_payload_sz to drop tail garbages */
+		phy_payload_sz = sizeof(phr) + phr_frame_length;
 	}
 
-	/* frame_len: total number of octets contained in the PSDU.
-	 *            including PHY payload and CRC.
-	 *            doesn't include PHR.
-	 */
-	ret = wisun_2fsk_packet_recovery(buf + preamble_sz / 8,
-					 binary_size - preamble_sz,
-					 skip_whitening,
-					 skip_verify,
-					 &frame_len);
-	if (ret < 0) {
-		fprintf(stderr, "Error: verify 802.15.4 packet failed\n");
-		return ret;
+	binary_size = preamble_sz + (2 /* sfd */ + phy_payload_sz) * 8;
+
+	if (!skip_verify) {
+		bool good = false;
+
+		if (!(phr & WISUN_2FSK_PHR_FCS_TYPE_CRC16))
+			good = ieee_802154_fcs32_buf_is_good(
+						p_phy_payload + sizeof(phr),
+						phy_payload_sz - sizeof(phr));
+		else
+			fprintf(stderr, "warnning: FCS16 is not supported\n");
+
+		if (!good) {
+			fprintf(stderr, "Error: verify 802.15.4 packet "
+				"failed\n");
+			return -1;
+		}
 	}
 
 	if (option_verbose > 0)
 		printf("After packet decode\n");
 
-	wisun_2fsk_print_packet(buf, binary_size, preamble_sz, type, frame_len);
+	wisun_2fsk_print_packet(buf, binary_size, preamble_sz, type,
+				phy_payload_sz - sizeof(phr));
 	return 0;
 }
 
